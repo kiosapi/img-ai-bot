@@ -1,0 +1,32 @@
+# ---- Secrets (NEVER commit) ----
+.env
+*.env
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# ---- Logs & misc ----
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ---- Docker volumes / data ----
+pgdata/
+postgres-data/
