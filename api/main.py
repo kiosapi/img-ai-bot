@@ -192,3 +192,112 @@ async def save_settings(body: SettingsBody, _: bool = Depends(require_auth)):
     await set_setting("daily_limit", max(0, body.daily_limit))
     await set_setting("maintenance", "1" if body.maintenance else "0")
     return {"ok": True}
+
+# ---------------- User detail ----------------
+@app.get("/api/users/{uid}")
+async def user_detail(uid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        u = await con.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
+        if not u:
+            raise HTTPException(status_code=404, detail="User tidak ditemukan")
+        total = await con.fetchval("SELECT count(*) FROM generations WHERE user_id=$1", uid) or 0
+        ok = await con.fetchval("SELECT count(*) FROM generations WHERE user_id=$1 AND success", uid) or 0
+        today = await con.fetchval(
+            "SELECT count(*) FROM generations WHERE user_id=$1 AND created_at::date=CURRENT_DATE", uid) or 0
+        gens = await con.fetch(
+            "SELECT kind,prompt,size,success,created_at FROM generations "
+            "WHERE user_id=$1 ORDER BY id DESC LIMIT 50", uid)
+    return {
+        "user": dict(u), "total": total, "success": ok, "failed": total - ok, "today": today,
+        "generations": [dict(g) for g in gens],
+    }
+
+
+# ---------------- Analytics ----------------
+@app.get("/api/analytics")
+async def analytics(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        # Activity by hour of day (last 30d)
+        hours = await con.fetch(
+            "SELECT EXTRACT(HOUR FROM created_at)::int AS h, count(*) AS c "
+            "FROM generations WHERE created_at > now()-interval '30 days' GROUP BY h ORDER BY h")
+        # Top prompts (last 30d)
+        top = await con.fetch(
+            "SELECT prompt, count(*) AS c FROM generations "
+            "WHERE created_at > now()-interval '30 days' AND prompt IS NOT NULL AND prompt <> '' "
+            "GROUP BY prompt ORDER BY c DESC LIMIT 10")
+        # kind breakdown
+        kinds = await con.fetch("SELECT kind, count(*) AS c FROM generations GROUP BY kind")
+        # daily success rate (last 14d)
+        daily = await con.fetch(
+            "SELECT d::date AS day, "
+            "COALESCE((SELECT count(*) FROM generations g WHERE g.created_at::date=d::date),0) AS total, "
+            "COALESCE((SELECT count(*) FROM generations g WHERE g.created_at::date=d::date AND g.success),0) AS ok "
+            "FROM generate_series(CURRENT_DATE-13, CURRENT_DATE, '1 day') d ORDER BY day")
+        # top users
+        topusers = await con.fetch(
+            "SELECT g.user_id, u.username, count(*) AS c FROM generations g "
+            "LEFT JOIN users u ON u.user_id=g.user_id GROUP BY g.user_id,u.username ORDER BY c DESC LIMIT 8")
+    hour_map = {int(r["h"]): r["c"] for r in hours}
+    return {
+        "hours": [{"hour": h, "count": hour_map.get(h, 0)} for h in range(24)],
+        "top_prompts": [dict(r) for r in top],
+        "kinds": [dict(r) for r in kinds],
+        "daily_success": [
+            {"day": r["day"].strftime("%d/%m"),
+             "rate": round(100 * r["ok"] / r["total"]) if r["total"] else 0,
+             "total": r["total"]} for r in daily],
+        "top_users": [dict(r) for r in topusers],
+    }
+
+# ---------------- Errors log ----------------
+@app.get("/api/errors")
+async def errors(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT g.id,g.user_id,g.kind,g.prompt,g.size,g.created_at,u.username "
+            "FROM generations g LEFT JOIN users u ON u.user_id=g.user_id "
+            "WHERE g.success=false ORDER BY g.id DESC LIMIT 100")
+        total_failed = await con.fetchval("SELECT count(*) FROM generations WHERE NOT success") or 0
+        failed_today = await con.fetchval(
+            "SELECT count(*) FROM generations WHERE NOT success AND created_at::date=CURRENT_DATE") or 0
+    return {"total_failed": total_failed, "failed_today": failed_today,
+            "errors": [dict(r) for r in rows]}
+
+
+# ---------------- CSV export ----------------
+def _csv_response(rows, headers, filename):
+    import csv, io
+    from fastapi.responses import StreamingResponse
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow(r)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@app.get("/api/export/users.csv")
+async def export_users(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT u.user_id,u.username,u.first_name,u.is_banned,u.created_at,"
+            "count(g.id) AS gen_count FROM users u LEFT JOIN generations g ON g.user_id=u.user_id "
+            "GROUP BY u.user_id ORDER BY gen_count DESC")
+    data = [[r["user_id"], r["username"] or "", r["first_name"] or "",
+             "yes" if r["is_banned"] else "no", r["created_at"], r["gen_count"]] for r in rows]
+    return _csv_response(data, ["user_id", "username", "first_name", "banned", "created_at", "total_generations"], "users.csv")
+
+
+@app.get("/api/export/generations.csv")
+async def export_generations(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT g.id,g.user_id,u.username,g.kind,g.prompt,g.size,g.success,g.created_at "
+            "FROM generations g LEFT JOIN users u ON u.user_id=g.user_id ORDER BY g.id DESC LIMIT 10000")
+    data = [[r["id"], r["user_id"], r["username"] or "", r["kind"], r["prompt"] or "",
+             r["size"] or "", "ok" if r["success"] else "failed", r["created_at"]] for r in rows]
+    return _csv_response(data, ["id", "user_id", "username", "kind", "prompt", "size", "status", "created_at"], "generations.csv")

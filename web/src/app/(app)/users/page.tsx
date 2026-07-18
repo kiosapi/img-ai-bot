@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
-import { Search, Ban, CheckCircle2 } from "lucide-react";
+import Link from "next/link";
+import { Search, Ban, CheckCircle2, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
@@ -73,11 +74,13 @@ export default function UsersPage() {
                 {(u.username || u.first_name || "U")[0].toUpperCase()}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-semibold">
-                  {u.username ? "@" + u.username : (u.first_name || "User")}
-                  {u.is_banned && <Badge variant="destructive" className="ml-2">banned</Badge>}
-                </div>
-                <div className="text-xs text-muted-foreground">ID {u.user_id} · <Badge variant="default">{u.gen_count} gambar</Badge></div>
+                <Link href={`/users/${u.user_id}`} className="block hover:opacity-70 transition-opacity">
+                  <div className="truncate text-sm font-semibold">
+                    {u.username ? "@" + u.username : (u.first_name || "User")}
+                    {u.is_banned && <Badge variant="destructive" className="ml-2">banned</Badge>}
+                  </div>
+                  <div className="text-xs text-muted-foreground">ID {u.user_id} · <Badge variant="default">{u.gen_count} gambar</Badge></div>
+                </Link>
               </div>
               {u.is_banned
                 ? <Button size="sm" variant="success" onClick={() => toggleBan(u)}><CheckCircle2 className="h-4 w-4" />Unban</Button>

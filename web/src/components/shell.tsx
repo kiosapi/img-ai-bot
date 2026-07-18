@@ -3,14 +3,16 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
-import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles } from "lucide-react";
+import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle } from "lucide-react";
 import { cn, api } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: LayoutGrid },
+  { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/users", label: "User", icon: Users },
   { href: "/broadcast", label: "Broadcast", icon: Radio },
+  { href: "/errors", label: "Error", icon: AlertTriangle },
   { href: "/settings", label: "Setting", icon: Settings },
 ];
 
@@ -38,7 +40,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </div>
         <nav className="flex flex-col gap-1 flex-1">
           {nav.map((n) => {
-            const active = path === n.href;
+            const active = n.href === "/" ? path === "/" : path.startsWith(n.href);
             return (
               <Link key={n.href} href={n.href}
                 className={cn("flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors",
@@ -77,12 +79,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
       {/* Bottom tab bar (mobile) */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 flex justify-around border-t bg-card/90 backdrop-blur pb-[env(safe-area-inset-bottom)]">
         {nav.map((n) => {
-          const active = path === n.href;
+          const active = n.href === "/" ? path === "/" : path.startsWith(n.href);
           return (
             <Link key={n.href} href={n.href}
-              className={cn("flex flex-col items-center gap-1 py-2.5 px-4 text-[11px] font-medium",
+              className={cn("flex flex-col items-center gap-0.5 py-2 px-2 text-[10px] font-medium",
                 active ? "text-primary" : "text-muted-foreground")}>
-              <n.icon className="h-6 w-6" />{n.label}
+              <n.icon className="h-5 w-5" />{n.label}
             </Link>
           );
         })}
