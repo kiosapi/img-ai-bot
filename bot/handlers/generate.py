@@ -8,6 +8,7 @@ import ui
 import cubence
 from i18n import t
 from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE
+from tgutil import safe_edit, ProgressAnimator
 
 router = Router()
 
@@ -44,7 +45,7 @@ async def set_size(callback: CallbackQuery):
     size = callback.data.split(":", 1)[1]
     if size in ALLOWED_SIZES:
         await db.set_pref_size(callback.from_user.id, size)
-        await callback.message.edit_text(t("size_set", lang, size=size), reply_markup=ui.back_menu(lang))
+        await safe_edit(callback.message, t("size_set", lang, size=size), reply_markup=ui.back_menu(lang))
     await callback.answer(t("size_saved", lang))
 
 
@@ -63,7 +64,9 @@ async def _do_generate(message: Message, prompt: str):
         return
 
     size = await _size_of(message.from_user.id)
-    status = await message.answer(t("generating", lang, used=used, limit=limit))
+    status = await message.answer(t("generating", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used, limit=limit))
+    animator.start()
     try:
         img = await cubence.generate_image(prompt, size=size)
         await message.answer_photo(
@@ -75,7 +78,13 @@ async def _do_generate(message: Message, prompt: str):
     except cubence.CubenceError as e:
         await db.log_generation(message.from_user.id, "generate", prompt, size, False)
         await message.answer(t("gen_failed", lang, err=e), reply_markup=ui.back_menu(lang))
+    except Exception as e:
+        # Catch-all so unexpected errors never leave the user without any
+        # response at all (previously this could crash the update silently).
+        await db.log_generation(message.from_user.id, "generate", prompt, size, False)
+        await message.answer(t("gen_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
     finally:
+        await animator.stop()
         try:
             await status.delete()
         except Exception:

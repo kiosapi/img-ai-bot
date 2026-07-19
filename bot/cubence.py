@@ -9,6 +9,14 @@ class CubenceError(Exception):
     pass
 
 
+# Generation/edit calls to the upstream model can legitimately take 1-3+
+# minutes. Give it a generous ceiling, and make sure any network failure
+# (timeout, connection reset, etc.) is turned into a CubenceError instead of
+# an unhandled exception that would crash the update silently (user sees
+# nothing and the bot looks "stuck").
+REQUEST_TIMEOUT = httpx.Timeout(280.0, connect=20.0)
+
+
 async def generate_image(prompt: str, size: str = "1024x1024") -> bytes:
     """Text-to-image. Returns raw PNG bytes."""
     url = f"{CUBENCE_BASE_URL}/v1/images/generations"
@@ -17,8 +25,13 @@ async def generate_image(prompt: str, size: str = "1024x1024") -> bytes:
         "Authorization": f"Bearer {CUBENCE_API_KEY}",
         "Content-Type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+    except httpx.TimeoutException:
+        raise CubenceError("Server AI kelamaan merespons (timeout). Coba lagi ya.")
+    except httpx.HTTPError as e:
+        raise CubenceError(f"Gagal menghubungi server AI: {e}")
     return _parse_image_response(resp)
 
 
@@ -29,8 +42,13 @@ async def edit_image(image_bytes: bytes, prompt: str, size: str = "1024x1024",
     headers = {"Authorization": f"Bearer {CUBENCE_API_KEY}"}
     files = {"image": (filename, image_bytes, "image/png")}
     data = {"model": IMAGE_MODEL, "prompt": prompt, "n": "1", "size": size}
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(url, headers=headers, data=data, files=files)
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.post(url, headers=headers, data=data, files=files)
+    except httpx.TimeoutException:
+        raise CubenceError("Server AI kelamaan merespons (timeout). Coba lagi ya.")
+    except httpx.HTTPError as e:
+        raise CubenceError(f"Gagal menghubungi server AI: {e}")
     return _parse_image_response(resp)
 
 

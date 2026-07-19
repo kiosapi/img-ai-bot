@@ -8,6 +8,7 @@ import db
 import ui
 from i18n import t
 from config import ADMIN_IDS
+from tgutil import safe_edit
 
 router = Router()
 
@@ -19,7 +20,7 @@ ASK_CUSTOM_MARKER = "TOPUP_CUSTOM_AMOUNT"
 async def show_balance(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
     balance = await db.get_balance(callback.from_user.id)
-    await callback.message.edit_text(ui.balance_text(balance, lang), reply_markup=ui.balance_menu(lang))
+    await safe_edit(callback.message, ui.balance_text(balance, lang), reply_markup=ui.balance_menu(lang))
     await callback.answer()
 
 
@@ -29,10 +30,10 @@ async def new_deposit(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
     settings = await db.get_balance_settings()
     if not settings["enabled"]:
-        await callback.message.edit_text(t("deposit_disabled", lang), reply_markup=ui.back_menu(lang))
+        await safe_edit(callback.message, t("deposit_disabled", lang), reply_markup=ui.back_menu(lang))
         await callback.answer()
         return
-    await callback.message.edit_text(
+    await safe_edit(callback.message, 
         t("deposit_pick_amount", lang, min=ui.rupiah(settings["min_amount"]), max=ui.rupiah(settings["max_amount"])),
         reply_markup=ui.deposit_amount_menu(settings["quick_amounts"], lang))
     await callback.answer()
@@ -60,7 +61,7 @@ async def _proceed_amount(message_or_cb, user_id: int, amount: int, lang: str, e
     text = t("deposit_pick_method", lang, amount=ui.rupiah(amount))
     kb = ui.deposit_methods_menu(methods, amount, lang)
     if edit:
-        await message_or_cb.message.edit_text(text, reply_markup=kb)
+        await safe_edit(message_or_cb.message, text, reply_markup=kb)
     else:
         await message_or_cb.answer(text, reply_markup=kb)
 
@@ -129,7 +130,7 @@ async def cancel_deposit(callback: CallbackQuery):
     dep = await db.get_pending_deposit(callback.from_user.id)
     if dep:
         await db.cancel_deposit(dep["id"])
-    await callback.message.edit_text(t("deposit_cancelled", lang), reply_markup=ui.back_menu(lang))
+    await safe_edit(callback.message, t("deposit_cancelled", lang), reply_markup=ui.back_menu(lang))
     await callback.answer()
 
 
@@ -138,7 +139,7 @@ async def cancel_deposit(callback: CallbackQuery):
 async def deposit_history(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
     deposits = await db.get_user_deposits(callback.from_user.id)
-    await callback.message.edit_text(ui.deposit_history_text(deposits, lang), reply_markup=ui.back_menu(lang))
+    await safe_edit(callback.message, ui.deposit_history_text(deposits, lang), reply_markup=ui.back_menu(lang))
     await callback.answer()
 
 

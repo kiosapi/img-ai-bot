@@ -8,6 +8,7 @@ import ui
 from i18n import t
 from config import REQUIRED_CHANNEL, DEFAULT_DAILY_LIMIT, DEFAULT_SIZE
 from middlewares.subscription import is_subscribed
+from tgutil import safe_edit
 
 router = Router()
 
@@ -71,7 +72,7 @@ async def cmd_lang(message: Message):
 @router.callback_query(F.data == "menu:home")
 async def nav_home(callback: CallbackQuery):
     lang = await _lang(callback.from_user.id)
-    await callback.message.edit_text(
+    await safe_edit(callback.message, 
         ui.welcome(callback.from_user.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
     await callback.answer()
 
@@ -79,7 +80,7 @@ async def nav_home(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:help")
 async def nav_help(callback: CallbackQuery):
     lang = await _lang(callback.from_user.id)
-    await callback.message.edit_text(ui.help_text(lang), reply_markup=ui.back_menu(lang))
+    await safe_edit(callback.message, ui.help_text(lang), reply_markup=ui.back_menu(lang))
     await callback.answer()
 
 
@@ -89,7 +90,7 @@ async def nav_quota(callback: CallbackQuery):
     limit = await db.effective_daily_limit(callback.from_user.id, DEFAULT_DAILY_LIMIT)
     used = await db.get_today_count(callback.from_user.id)
     premium = await db.get_premium_info(callback.from_user.id)
-    await callback.message.edit_text(ui.quota_text(used, limit, premium, lang), reply_markup=ui.back_menu(lang))
+    await safe_edit(callback.message, ui.quota_text(used, limit, premium, lang), reply_markup=ui.back_menu(lang))
     await callback.answer()
 
 
@@ -97,7 +98,7 @@ async def nav_quota(callback: CallbackQuery):
 async def nav_size(callback: CallbackQuery):
     lang = await _lang(callback.from_user.id)
     current = await db.get_pref_size(callback.from_user.id, DEFAULT_SIZE)
-    await callback.message.edit_text(t("size_pick", lang), reply_markup=ui.size_menu(current, lang))
+    await safe_edit(callback.message, t("size_pick", lang), reply_markup=ui.size_menu(current, lang))
     await callback.answer()
 
 
@@ -119,7 +120,7 @@ async def nav_edit(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:lang")
 async def nav_lang(callback: CallbackQuery):
     lang = await _lang(callback.from_user.id)
-    await callback.message.edit_text(t("lang_pick", lang), reply_markup=ui.lang_menu())
+    await safe_edit(callback.message, t("lang_pick", lang), reply_markup=ui.lang_menu())
     await callback.answer()
 
 
@@ -127,7 +128,7 @@ async def nav_lang(callback: CallbackQuery):
 async def set_lang(callback: CallbackQuery):
     new_lang = callback.data.split(":", 1)[1]
     await db.set_lang(callback.from_user.id, new_lang)
-    await callback.message.edit_text(
+    await safe_edit(callback.message, 
         ui.welcome(callback.from_user.first_name or "kawan", new_lang), reply_markup=ui.main_menu(new_lang))
     await callback.answer(t("lang_set", new_lang))
 
@@ -137,6 +138,6 @@ async def set_lang(callback: CallbackQuery):
 async def check_sub(callback: CallbackQuery):
     lang = await _lang(callback.from_user.id)
     if await is_subscribed(callback.bot, callback.from_user.id):
-        await callback.message.edit_text(t("join_success", lang), reply_markup=ui.main_menu(lang))
+        await safe_edit(callback.message, t("join_success", lang), reply_markup=ui.main_menu(lang))
     else:
         await callback.answer(t("join_not_detected", lang, channel=REQUIRED_CHANNEL), show_alert=True)
