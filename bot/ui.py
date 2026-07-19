@@ -74,6 +74,7 @@ def main_menu(lang: str = "id"):
     kb.button(text=t("menu_edit", lang), callback_data="menu:edit")
     kb.button(text=t("menu_style", lang), callback_data="menu:style")
     kb.button(text=t("menu_myworks", lang), callback_data="myworks:0")
+    kb.button(text=t("menu_checkin", lang), callback_data="menu:checkin")
     kb.button(text=t("menu_size", lang), callback_data="menu:size")
     kb.button(text=t("menu_quota", lang), callback_data="menu:quota")
     kb.button(text=t("menu_balance", lang), callback_data="menu:balance")
@@ -81,7 +82,7 @@ def main_menu(lang: str = "id"):
     kb.button(text=t("menu_referral", lang), callback_data="menu:referral")
     kb.button(text=t("menu_lang", lang), callback_data="menu:lang")
     kb.button(text=t("menu_help", lang), callback_data="menu:help")
-    kb.adjust(2, 2, 2, 2, 3)
+    kb.adjust(2, 2, 2, 2, 2, 2)
     return kb.as_markup()
 
 
@@ -350,3 +351,14 @@ def referral_menu(lang: str = "id"):
     kb.button(text=t("back_home", lang), callback_data="menu:home")
     kb.adjust(1)
     return kb.as_markup()
+
+
+# ---------------- Check-in ----------------
+def checkin_menu(lang: str = "id", can: bool = True):
+    kb = InlineKeyboardBuilder()
+    if can:
+        kb.button(text=t("checkin_button", lang), callback_data="checkin:do")
+    kb.button(text=t("back_home", lang), callback_data="menu:home")
+    kb.adjust(1)
+    return kb.as_markup()
+

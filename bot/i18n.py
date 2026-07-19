@@ -199,6 +199,20 @@ TEXTS: dict[str, dict[str, str]] = {
         "myworks_view": "🖼️ <b>Karya #{id}</b>\n\n📝 <i>{prompt}</i>\n📐 {size} · {kind} · {date}",
         "myworks_regen_hint": "Gunakan tombol di bawah untuk buat ulang, variasi, atau edit.",
 
+        # ---- check-in ----
+        "menu_checkin": "📅 Check-in",
+        "checkin_title": "📅 <b>Daily Check-in</b>\n\n🔥 Streak: <b>{streak}</b> hari\n📊 Total check-in: <b>{total}</b>\n\nCheck-in setiap hari dapat bonus kuota!\nHari ke-3 = +2, ke-7 = +5, 30 hari = +20!",
+        "checkin_status": "Streak {streak} · Total {total} · {can}",
+        "checkin_can": "belum check-in hari ini",
+        "checkin_done_today": "sudah check-in hari ini",
+        "checkin_ok": "✅ <b>Check-in berhasil!</b>\n\n🔥 Streak: <b>{streak}</b> hari\n🎁 Bonus: <b>+{bonus}</b> kuota\n📊 Total: {total} kali",
+        "checkin_already": "✅ Kamu sudah check-in hari ini!\n\n🔥 Streak: {streak} hari. Balik lagi besok ya!",
+        "checkin_toast": "🎁 Dapat +{bonus} kuota!",
+        "checkin_button": "✅ Check-in Hari Ini",
+
+        # ---- queue ----
+        "busy_generating": "⏳ Kamu masih dalam proses generate/edit. Tunggu selesai dulu ya!",
+
         # ---- referral ----
         "referral_text": (
             "🎁 <b>Ajak Teman</b>\n\n"
@@ -419,6 +433,18 @@ TEXTS: dict[str, dict[str, str]] = {
         "myworks_next": "▶️ Next",
         "myworks_view": "🖼️ <b>Creation #{id}</b>\n\n📝 <i>{prompt}</i>\n📐 {size} · {kind} · {date}",
         "myworks_regen_hint": "Use buttons below to regen, vary, or edit.",
+
+        "menu_checkin": "📅 Check-in",
+        "checkin_title": "📅 <b>Daily Check-in</b>\n\n🔥 Streak: <b>{streak}</b> days\n📊 Total: <b>{total}</b>\n\nCheck in daily for bonus quota!\nDay 3 = +2, day 7 = +5, 30 days = +20!",
+        "checkin_status": "Streak {streak} · Total {total} · {can}",
+        "checkin_can": "not checked in today",
+        "checkin_done_today": "already checked in today",
+        "checkin_ok": "✅ <b>Check-in OK!</b>\n\n🔥 Streak: <b>{streak}</b> days\n🎁 Bonus: <b>+{bonus}</b> quota\n📊 Total: {total}",
+        "checkin_already": "✅ Already checked in today!\n\n🔥 Streak: {streak} days. Come back tomorrow!",
+        "checkin_toast": "🎁 +{bonus} quota!",
+        "checkin_button": "✅ Check-in Today",
+
+        "busy_generating": "⏳ You still have a generation in progress. Wait for it to finish!",
 
         # ---- referral ----
         "referral_text": (

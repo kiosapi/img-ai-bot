@@ -19,6 +19,7 @@ from i18n import t
 from handlers.generate import check_and_consume, _size_of, is_maintenance, _style_of
 from tgutil import ProgressAnimator, safe_edit
 from states import EditStates
+from queue import QUEUE
 
 router = Router()
 
@@ -30,12 +31,17 @@ async def _has_pending_deposit_awaiting_proof(user_id: int) -> bool:
 
 async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str | None = None):
     lang = await db.get_lang(message.from_user.id)
+    if not await QUEUE.acquire(message.from_user.id):
+        await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
+        return
     if await is_maintenance():
+        await QUEUE.release(message.from_user.id)
         await message.answer(t("maintenance", lang))
         return
 
     allowed, used, limit = await check_and_consume(message.from_user.id)
     if not allowed:
+        await QUEUE.release(message.from_user.id)
         await message.answer(
             t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)),
             reply_markup=ui.back_menu(lang))
@@ -82,6 +88,7 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
         await db.log_generation(message.from_user.id, "edit", prompt, size, False, style_id=style_id if style_id != "none" else None)
         await message.answer(t("edit_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
     finally:
+        await QUEUE.release(message.from_user.id)
         await animator.stop()
         try:
             await status.delete()

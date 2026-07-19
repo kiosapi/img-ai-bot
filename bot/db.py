@@ -155,6 +155,24 @@ async def _create_schema():
         await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS result_file_id TEXT;")
         await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS style_id TEXT;")
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_style TEXT;")
+        # daily check-in + streak
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_checkin DATE;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS streak INT NOT NULL DEFAULT 0;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS total_checkin INT NOT NULL DEFAULT 0;")
+        # aiogram FSM PG persistent storage
+        await con.execute("""
+            CREATE TABLE IF NOT EXISTS aiogram_states (
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                state TEXT,
+                data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (chat_id, user_id)
+            );
+        """)
+        await con.execute("ALTER TABLE aiogram_states ADD COLUMN IF NOT EXISTS state TEXT;")
+        await con.execute("ALTER TABLE aiogram_states ADD COLUMN IF NOT EXISTS data JSONB NOT NULL DEFAULT '{}'::jsonb;")
+        await con.execute("ALTER TABLE aiogram_states ADD COLUMN IF NOT EXISTS updated TIMESTAMPTZ NOT NULL DEFAULT now();")
 
 
 # ---------- users ----------
@@ -716,4 +734,56 @@ async def get_pref_style(user_id: int, default: str | None = None) -> str | None
 async def set_pref_style(user_id: int, style_id: str | None):
     async with _pool.acquire() as con:
         await con.execute("UPDATE users SET pref_style=$2 WHERE user_id=$1", user_id, style_id)
+
+
+# ---------- daily check-in + streak ----------
+async def get_checkin_info(user_id: int) -> dict:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT last_checkin, streak, total_checkin FROM users WHERE user_id=$1", user_id)
+        if not row:
+            return {"last_checkin": None, "streak": 0, "total_checkin": 0}
+        return dict(row)
+
+
+async def try_checkin(user_id: int) -> tuple[bool, int, int, int]:
+    """
+    Attempt daily check-in. Returns (ok, new_streak, total, bonus_quota_added).
+    ok=False if already checked in today.
+    Bonus: +1 quota, streak 3->+2, 7->+5, 30->+20 extra.
+    Uses FOR UPDATE to avoid race.
+    """
+    from datetime import date, timedelta
+    today = date.today()
+    async with _pool.acquire() as con:
+        async with con.transaction():
+            row = await con.fetchrow(
+                "SELECT last_checkin, streak, total_checkin FROM users WHERE user_id=$1 FOR UPDATE", user_id)
+            if not row:
+                return False, 0, 0, 0
+            if row["last_checkin"] == today:
+                return False, row["streak"], row["total_checkin"], 0
+            # determine new streak
+            last = row["last_checkin"]
+            if last and last == today - timedelta(days=1):
+                new_streak = (row["streak"] or 0) + 1
+            else:
+                new_streak = 1
+            new_total = (row["total_checkin"] or 0) + 1
+            await con.execute(
+                "UPDATE users SET last_checkin=$2, streak=$3, total_checkin=$4 WHERE user_id=$1",
+                user_id, today, new_streak, new_total)
+            # bonus quota calc
+            bonus = 1
+            if new_streak == 3:
+                bonus = 2
+            elif new_streak == 7:
+                bonus = 5
+            elif new_streak >= 30:
+                bonus = 20
+            elif new_streak > 7:
+                bonus = 2
+            await con.execute(
+                "UPDATE users SET bonus_quota = bonus_quota + $2 WHERE user_id=$1", user_id, bonus)
+            return True, new_streak, new_total, bonus
+
 

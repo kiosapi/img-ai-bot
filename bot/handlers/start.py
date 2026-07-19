@@ -24,6 +24,19 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     u = message.from_user
     lang = await _lang(u.id)
+    # inline switch_pm support
+    payload = (message.text or "").partition(" ")[2].strip()
+    if payload.startswith("gen_"):
+        # prompt encoded with _ as space from inline
+        raw = payload[4:].replace("_", " ").strip()
+        if raw and raw not in ("inline_empty", "inline_new"):
+            await message.answer(ui.welcome(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
+            from handlers.generate import _do_generate
+            # Schedule generate after welcome; use FSM wait
+            lang2 = await _lang(u.id)
+            await message.answer(f"🎨 <b>Generate:</b> <i>{raw}</i>\n\nMulai membuat...", reply_markup=ui.back_menu(lang2))
+            await _do_generate(message, raw)
+            return
     await message.answer(ui.welcome(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
 
 
