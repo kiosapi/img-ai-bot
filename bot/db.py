@@ -218,6 +218,11 @@ async def _create_schema():
             );
             """
         )
+        # cleanup legacy bare ids (migration from old single-provider) e.g. id='gpt-image-2' without prefix -> migrate to cubence:gpt-image-2
+        # also guard against external_id NULL legacy rows from API sync bug
+        await con.execute("DELETE FROM ai_models WHERE external_id IS NULL OR external_id='';")
+        await con.execute("DELETE FROM ai_models WHERE id NOT LIKE '%:%';")
+        await con.execute("ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS display_name TEXT;")
         await con.execute("ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS external_id TEXT;")
         await con.execute("UPDATE ai_models SET external_id = COALESCE(external_id, id) WHERE external_id IS NULL;")
         # try to ensure id is provider:external format for new collision-safe handling (backfill old rows if needed)
