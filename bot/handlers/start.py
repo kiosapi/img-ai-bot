@@ -33,9 +33,18 @@ async def cmd_menu(message: Message):
 
 @router.message(Command("quota"))
 async def cmd_quota(message: Message):
-    limit = await db.get_daily_limit(DEFAULT_DAILY_LIMIT)
+    limit = await db.effective_daily_limit(message.from_user.id, DEFAULT_DAILY_LIMIT)
     used = await db.get_today_count(message.from_user.id)
-    await message.answer(ui.quota_text(used, limit), reply_markup=ui.back_menu())
+    premium = await db.get_premium_info(message.from_user.id)
+    await message.answer(ui.quota_text(used, limit, premium), reply_markup=ui.back_menu())
+
+
+@router.message(Command("upgrade"))
+async def cmd_upgrade(message: Message):
+    plans = await db.get_active_plans()
+    await message.answer(
+        ui.upgrade_intro(bool(plans)),
+        reply_markup=ui.plans_menu(plans) if plans else ui.back_menu())
 
 
 # ---------------- Menu navigation ----------------
@@ -54,9 +63,10 @@ async def nav_help(callback: CallbackQuery):
 
 @router.callback_query(F.data == "menu:quota")
 async def nav_quota(callback: CallbackQuery):
-    limit = await db.get_daily_limit(DEFAULT_DAILY_LIMIT)
+    limit = await db.effective_daily_limit(callback.from_user.id, DEFAULT_DAILY_LIMIT)
     used = await db.get_today_count(callback.from_user.id)
-    await callback.message.edit_text(ui.quota_text(used, limit), reply_markup=ui.back_menu())
+    premium = await db.get_premium_info(callback.from_user.id)
+    await callback.message.edit_text(ui.quota_text(used, limit, premium), reply_markup=ui.back_menu())
     await callback.answer()
 
 

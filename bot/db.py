@@ -51,10 +51,55 @@ async def _create_schema():
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS plans (
+                id           SERIAL PRIMARY KEY,
+                name         TEXT    NOT NULL,
+                daily_limit  INT     NOT NULL DEFAULT 100,   -- 0 = unlimited
+                price        BIGINT  NOT NULL DEFAULT 0,      -- in IDR
+                duration_days INT    NOT NULL DEFAULT 30,
+                description  TEXT,
+                is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+                sort_order   INT     NOT NULL DEFAULT 0,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_methods (
+                id           SERIAL PRIMARY KEY,
+                type         TEXT    NOT NULL,          -- 'bank' | 'ewallet' | 'qris' | 'other'
+                name         TEXT    NOT NULL,          -- e.g. 'BCA', 'DANA', 'QRIS'
+                account_name TEXT,                       -- holder name
+                account_number TEXT,                     -- number / phone / id
+                instructions TEXT,                       -- extra notes
+                qr_image     TEXT,                        -- Telegram file_id for QRIS image
+                is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+                sort_order   INT     NOT NULL DEFAULT 0,
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+
+            CREATE TABLE IF NOT EXISTS orders (
+                id            BIGSERIAL PRIMARY KEY,
+                user_id       BIGINT NOT NULL,
+                plan_id       INT,
+                method_id     INT,
+                plan_name     TEXT,      -- snapshot at order time
+                method_name   TEXT,      -- snapshot
+                amount        BIGINT NOT NULL DEFAULT 0,
+                daily_limit   INT    NOT NULL DEFAULT 0,   -- snapshot of plan limit
+                duration_days INT    NOT NULL DEFAULT 30,  -- snapshot
+                proof_file_id TEXT,                          -- Telegram photo file_id
+                status        TEXT   NOT NULL DEFAULT 'pending', -- pending|approved|rejected
+                note          TEXT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                decided_at    TIMESTAMPTZ
+            );
             """
         )
-        # migration for existing DBs (pre-pref_size)
+        # migrations for existing DBs
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_size TEXT;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_id INT;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_name TEXT;")
 
 
 # ---------- users ----------
@@ -151,3 +196,123 @@ async def get_daily_limit(fallback: int) -> int:
         return int(val) if val is not None else fallback
     except ValueError:
         return fallback
+
+
+# ---------- premium / plans / payments ----------
+async def is_premium(user_id: int) -> bool:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "SELECT premium_until FROM users WHERE user_id=$1", user_id)
+        return bool(row and row["premium_until"] and row["premium_until"] > _now())
+
+
+def _now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+async def get_premium_info(user_id: int) -> dict | None:
+    """Returns {plan_name, premium_until, daily_limit} if active premium, else None."""
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "SELECT premium_until, plan_name, plan_id FROM users WHERE user_id=$1", user_id)
+        if not (row and row["premium_until"] and row["premium_until"] > _now()):
+            return None
+        limit = None
+        if row["plan_id"]:
+            p = await con.fetchrow("SELECT daily_limit FROM plans WHERE id=$1", row["plan_id"])
+            limit = p["daily_limit"] if p else None
+        return {"plan_name": row["plan_name"], "premium_until": row["premium_until"], "daily_limit": limit}
+
+
+async def effective_daily_limit(user_id: int, free_fallback: int) -> int:
+    """Premium users get their plan's limit; else the global free limit. 0 = unlimited."""
+    info = await get_premium_info(user_id)
+    if info and info["daily_limit"] is not None:
+        return info["daily_limit"]
+    return await get_daily_limit(free_fallback)
+
+
+async def activate_premium(user_id: int, plan_id: int, plan_name: str, duration_days: int):
+    from datetime import timedelta
+    async with _pool.acquire() as con:
+        # Extend from current expiry if still active, else from now.
+        row = await con.fetchrow("SELECT premium_until FROM users WHERE user_id=$1", user_id)
+        base = _now()
+        if row and row["premium_until"] and row["premium_until"] > base:
+            base = row["premium_until"]
+        new_until = base + timedelta(days=duration_days)
+        await con.execute(
+            "UPDATE users SET premium_until=$2, plan_id=$3, plan_name=$4 WHERE user_id=$1",
+            user_id, new_until, plan_id, plan_name)
+        return new_until
+
+
+# ---- plans (read) ----
+async def get_active_plans() -> list[dict]:
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT * FROM plans WHERE is_active ORDER BY sort_order, price")
+        return [dict(r) for r in rows]
+
+
+async def get_plan(plan_id: int) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM plans WHERE id=$1", plan_id)
+        return dict(row) if row else None
+
+
+# ---- payment methods (read) ----
+async def get_active_methods() -> list[dict]:
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT * FROM payment_methods WHERE is_active ORDER BY sort_order, id")
+        return [dict(r) for r in rows]
+
+
+async def get_method(method_id: int) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM payment_methods WHERE id=$1", method_id)
+        return dict(row) if row else None
+
+
+# ---- orders ----
+async def create_order(user_id, plan: dict, method: dict) -> int:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "INSERT INTO orders (user_id, plan_id, method_id, plan_name, method_name, amount, "
+            "daily_limit, duration_days) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+            user_id, plan["id"], method["id"], plan["name"], method["name"],
+            plan["price"], plan["daily_limit"], plan["duration_days"])
+        return row["id"]
+
+
+async def attach_proof(order_id: int, file_id: str):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE orders SET proof_file_id=$2 WHERE id=$1", order_id, file_id)
+
+
+async def cancel_order(order_id: int):
+    async with _pool.acquire() as con:
+        await con.execute(
+            "UPDATE orders SET status='rejected', note='dibatalkan user', decided_at=now() "
+            "WHERE id=$1 AND status='pending'", order_id)
+
+
+async def get_pending_order(user_id: int) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "SELECT * FROM orders WHERE user_id=$1 AND status='pending' ORDER BY id DESC LIMIT 1",
+            user_id)
+        return dict(row) if row else None
+
+
+async def seed_default_plan():
+    """Ensure at least one plan exists so admin has a starting point."""
+    async with _pool.acquire() as con:
+        n = await con.fetchval("SELECT count(*) FROM plans")
+        if n == 0:
+            await con.execute(
+                "INSERT INTO plans (name, daily_limit, price, duration_days, description, sort_order) "
+                "VALUES ($1,$2,$3,$4,$5,$6)",
+                "Premium", 100, 20000, 30, "Kuota 100 gambar/hari selama 30 hari", 1)

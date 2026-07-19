@@ -10,7 +10,7 @@ from aiogram.types import BotCommand
 import db
 import config
 from middlewares.subscription import SubscriptionMiddleware
-from handlers import start, generate, edit
+from handlers import start, generate, edit, premium
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,12 +21,14 @@ async def _set_commands(bot: Bot):
         BotCommand(command="generate", description="🎨 Buat gambar dari teks"),
         BotCommand(command="size", description="📐 Pilih ukuran gambar"),
         BotCommand(command="quota", description="📊 Cek kuota harian"),
+        BotCommand(command="upgrade", description="💎 Upgrade ke Premium"),
         BotCommand(command="help", description="❓ Bantuan"),
     ])
 
 
 async def main():
     await db.init_pool(config.DATABASE_URL)
+    await db.seed_default_plan()
 
     bot = Bot(
         token=config.BOT_TOKEN,
@@ -43,6 +45,7 @@ async def main():
     # the check_sub callback through because is_subscribed re-checks live.
     dp.include_router(start.router)
     dp.include_router(generate.router)
+    dp.include_router(premium.router)
     dp.include_router(edit.router)
 
     logging.info("Bot starting (polling)...")

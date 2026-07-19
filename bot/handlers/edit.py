@@ -43,7 +43,7 @@ async def handle_photo(message: Message):
             caption=(
                 f"✅ <b>Edit selesai!</b>\n\n"
                 f"📝 <i>{prompt[:200]}</i>\n"
-                f"📐 {size}  ·  📊 Sisa {limit - used} gambar"
+                f"📐 {size}  ·  📊 Sisa {ui.sisa_text(used, limit)}"
             ),
             reply_markup=ui.result_menu(),
         )

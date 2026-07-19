@@ -20,10 +20,10 @@ async def _size_of(user_id: int) -> str:
 
 
 async def check_and_consume(user_id: int) -> tuple[bool, int, int]:
-    """Returns (allowed, used_after, limit). Does NOT consume if not allowed."""
-    limit = await db.get_daily_limit(DEFAULT_DAILY_LIMIT)
+    """Returns (allowed, used_after, limit). Does NOT consume if not allowed. limit 0 = unlimited."""
+    limit = await db.effective_daily_limit(user_id, DEFAULT_DAILY_LIMIT)
     used = await db.get_today_count(user_id)
-    if used >= limit:
+    if limit != 0 and used >= limit:
         return False, used, limit
     new_count = await db.increment_usage(user_id)
     return True, new_count, limit
@@ -68,7 +68,7 @@ async def _do_generate(message: Message, prompt: str):
             caption=(
                 f"✅ <b>Gambar selesai!</b>\n\n"
                 f"📝 <i>{prompt[:200]}</i>\n"
-                f"📐 {size}  ·  📊 Sisa {limit - used} gambar"
+                f"📐 {size}  ·  📊 Sisa {ui.sisa_text(used, limit)}"
             ),
             reply_markup=ui.result_menu(),
         )

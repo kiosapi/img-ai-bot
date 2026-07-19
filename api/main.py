@@ -301,3 +301,210 @@ async def export_generations(_: bool = Depends(require_auth)):
     data = [[r["id"], r["user_id"], r["username"] or "", r["kind"], r["prompt"] or "",
              r["size"] or "", "ok" if r["success"] else "failed", r["created_at"]] for r in rows]
     return _csv_response(data, ["id", "user_id", "username", "kind", "prompt", "size", "status", "created_at"], "generations.csv")
+
+# ==================== PREMIUM: Plans ====================
+class PlanBody(BaseModel):
+    name: str
+    daily_limit: int = 100
+    price: int = 0
+    duration_days: int = 30
+    description: str | None = None
+    is_active: bool = True
+    sort_order: int = 0
+
+
+@app.get("/api/plans")
+async def list_plans(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT * FROM plans ORDER BY sort_order, id")
+    return {"plans": [dict(r) for r in rows]}
+
+
+@app.post("/api/plans")
+async def create_plan(body: PlanBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "INSERT INTO plans (name,daily_limit,price,duration_days,description,is_active,sort_order) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+            body.name, body.daily_limit, body.price, body.duration_days,
+            body.description, body.is_active, body.sort_order)
+    return {"ok": True, "id": row["id"]}
+
+
+@app.put("/api/plans/{pid}")
+async def update_plan(pid: int, body: PlanBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute(
+            "UPDATE plans SET name=$2,daily_limit=$3,price=$4,duration_days=$5,"
+            "description=$6,is_active=$7,sort_order=$8 WHERE id=$1",
+            pid, body.name, body.daily_limit, body.price, body.duration_days,
+            body.description, body.is_active, body.sort_order)
+    return {"ok": True}
+
+
+@app.delete("/api/plans/{pid}")
+async def delete_plan(pid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute("DELETE FROM plans WHERE id=$1", pid)
+    return {"ok": True}
+
+
+# ==================== PREMIUM: Payment methods ====================
+class MethodBody(BaseModel):
+    type: str = "bank"
+    name: str
+    account_name: str | None = None
+    account_number: str | None = None
+    instructions: str | None = None
+    qr_image: str | None = None
+    is_active: bool = True
+    sort_order: int = 0
+
+
+@app.get("/api/methods")
+async def list_methods(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT * FROM payment_methods ORDER BY sort_order, id")
+    return {"methods": [dict(r) for r in rows]}
+
+
+@app.post("/api/methods")
+async def create_method(body: MethodBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "INSERT INTO payment_methods (type,name,account_name,account_number,instructions,qr_image,is_active,sort_order) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+            body.type, body.name, body.account_name, body.account_number,
+            body.instructions, body.qr_image, body.is_active, body.sort_order)
+    return {"ok": True, "id": row["id"]}
+
+
+@app.put("/api/methods/{mid}")
+async def update_method(mid: int, body: MethodBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute(
+            "UPDATE payment_methods SET type=$2,name=$3,account_name=$4,account_number=$5,"
+            "instructions=$6,qr_image=$7,is_active=$8,sort_order=$9 WHERE id=$1",
+            mid, body.type, body.name, body.account_name, body.account_number,
+            body.instructions, body.qr_image, body.is_active, body.sort_order)
+    return {"ok": True}
+
+
+@app.delete("/api/methods/{mid}")
+async def delete_method(mid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute("DELETE FROM payment_methods WHERE id=$1", mid)
+    return {"ok": True}
+
+# ==================== PREMIUM: Orders ====================
+@app.get("/api/orders")
+async def list_orders(status: str = "", _: bool = Depends(require_auth)):
+    q = ("SELECT o.*, u.username, u.first_name FROM orders o "
+         "LEFT JOIN users u ON u.user_id=o.user_id ")
+    args = []
+    if status in ("pending", "approved", "rejected"):
+        q += "WHERE o.status=$1 "
+        args.append(status)
+    q += "ORDER BY o.id DESC LIMIT 200"
+    async with _pool.acquire() as con:
+        rows = await con.fetch(q, *args)
+        counts = await con.fetch("SELECT status, count(*) c FROM orders GROUP BY status")
+    cmap = {r["status"]: r["c"] for r in counts}
+    return {"orders": [dict(r) for r in rows],
+            "counts": {"pending": cmap.get("pending", 0), "approved": cmap.get("approved", 0),
+                       "rejected": cmap.get("rejected", 0)}}
+
+
+@app.get("/api/orders/{oid}/proof")
+async def order_proof(oid: int, _: bool = Depends(require_auth)):
+    """Proxy the Telegram proof photo so the dashboard can display it."""
+    from fastapi.responses import Response as FResponse
+    async with _pool.acquire() as con:
+        fid = await con.fetchval("SELECT proof_file_id FROM orders WHERE id=$1", oid)
+    if not fid:
+        raise HTTPException(status_code=404, detail="Belum ada bukti")
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": fid})
+        path = r.json()["result"]["file_path"]
+        img = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
+    return FResponse(content=img.content, media_type="image/jpeg")
+
+
+class DecisionBody(BaseModel):
+    note: str | None = None
+
+
+async def _notify_user(user_id: int, text: str):
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": user_id, "text": text, "parse_mode": "HTML"})
+    except Exception:
+        pass
+
+
+def _rupiah(n) -> str:
+    return "Rp" + f"{int(n):,}".replace(",", ".")
+
+
+@app.post("/api/orders/{oid}/approve")
+async def approve_order(oid: int, _: bool = Depends(require_auth)):
+    from datetime import datetime, timezone, timedelta
+    async with _pool.acquire() as con:
+        o = await con.fetchrow("SELECT * FROM orders WHERE id=$1", oid)
+        if not o:
+            raise HTTPException(status_code=404, detail="Order tidak ditemukan")
+        if o["status"] != "pending":
+            raise HTTPException(status_code=400, detail="Order sudah diproses")
+        # Activate premium: extend from current expiry if still active.
+        base = datetime.now(timezone.utc)
+        cur = await con.fetchval("SELECT premium_until FROM users WHERE user_id=$1", o["user_id"])
+        if cur and cur > base:
+            base = cur
+        until = base + timedelta(days=o["duration_days"])
+        await con.execute(
+            "UPDATE users SET premium_until=$2, plan_id=$3, plan_name=$4 WHERE user_id=$1",
+            o["user_id"], until, o["plan_id"], o["plan_name"])
+        await con.execute(
+            "UPDATE orders SET status='approved', decided_at=now() WHERE id=$1", oid)
+    lim = "♾️ Unlimited" if o["daily_limit"] == 0 else f"{o['daily_limit']} gambar/hari"
+    await _notify_user(o["user_id"],
+        "🎉 <b>Selamat! Premium kamu aktif!</b>\n\n"
+        f"💎 Paket: <b>{o['plan_name']}</b>\n"
+        f"📊 Kuota: <b>{lim}</b>\n"
+        f"⏳ Berlaku s/d: <b>{until.strftime('%d %b %Y')}</b>\n\n"
+        "Terima kasih sudah upgrade! Selamat berkreasi 🎨")
+    return {"ok": True, "premium_until": until.isoformat()}
+
+
+@app.post("/api/orders/{oid}/reject")
+async def reject_order(oid: int, body: DecisionBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        o = await con.fetchrow("SELECT * FROM orders WHERE id=$1", oid)
+        if not o:
+            raise HTTPException(status_code=404, detail="Order tidak ditemukan")
+        if o["status"] != "pending":
+            raise HTTPException(status_code=400, detail="Order sudah diproses")
+        await con.execute(
+            "UPDATE orders SET status='rejected', note=$2, decided_at=now() WHERE id=$1",
+            oid, body.note)
+    txt = "❌ <b>Pembayaran ditolak</b>\n\nMaaf, pembayaranmu tidak dapat diverifikasi."
+    if body.note:
+        txt += f"\n\n📝 Catatan admin: <i>{body.note}</i>"
+    txt += "\n\nSilakan coba lagi atau hubungi admin ya 🙏"
+    await _notify_user(o["user_id"], txt)
+    return {"ok": True}
+
+
+@app.get("/api/premium/stats")
+async def premium_stats(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        active = await con.fetchval(
+            "SELECT count(*) FROM users WHERE premium_until > now()") or 0
+        pending = await con.fetchval("SELECT count(*) FROM orders WHERE status='pending'") or 0
+        revenue = await con.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='approved'") or 0
+        approved = await con.fetchval("SELECT count(*) FROM orders WHERE status='approved'") or 0
+    return {"active_premium": active, "pending_orders": pending,
+            "total_revenue": revenue, "total_approved": approved}
