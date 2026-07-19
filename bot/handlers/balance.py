@@ -2,17 +2,17 @@
 Admin approves/rejects the deposit from the dashboard; approval credits the balance.
 """
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, ForceReply
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, CallbackQuery
 
 import db
 import ui
 from i18n import t
 from config import ADMIN_IDS
 from tgutil import safe_edit
+from states import BalanceStates
 
 router = Router()
-
-ASK_CUSTOM_MARKER = "TOPUP_CUSTOM_AMOUNT"
 
 
 # ---------------- Balance home ----------------
@@ -40,12 +40,12 @@ async def new_deposit(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "depamt:custom")
-async def ask_custom_amount(callback: CallbackQuery):
+async def ask_custom_amount(callback: CallbackQuery, state: FSMContext):
     lang = await db.get_lang(callback.from_user.id)
     settings = await db.get_balance_settings()
     text = t("deposit_custom_ask", lang, min=ui.rupiah(settings["min_amount"]), max=ui.rupiah(settings["max_amount"]))
-    await callback.message.answer(
-        f"{ASK_CUSTOM_MARKER}\n{text}", reply_markup=ForceReply(input_field_placeholder="50000"))
+    await state.set_state(BalanceStates.waiting_custom_amount)
+    await callback.message.answer(text)
     await callback.answer()
 
 
@@ -78,17 +78,9 @@ async def pick_amount(callback: CallbackQuery):
     await callback.answer()
 
 
-# Reply to the ForceReply "custom amount" prompt.
-async def _is_custom_amount_reply(message: Message) -> bool:
-    rt = message.reply_to_message
-    return bool(rt and rt.from_user and rt.from_user.is_bot and (rt.text or "").startswith(ASK_CUSTOM_MARKER))
-
-
-@router.message(F.reply_to_message, F.text, ~F.text.startswith("/"), _is_custom_amount_reply)
-async def reply_custom_amount(message: Message):
-    rt = message.reply_to_message
-    if not (rt and rt.from_user and rt.from_user.is_bot and (rt.text or "").startswith(ASK_CUSTOM_MARKER)):
-        return
+@router.message(BalanceStates.waiting_custom_amount, F.text, ~F.text.startswith("/"))
+async def fsm_custom_amount(message: Message, state: FSMContext):
+    await state.clear()
     lang = await db.get_lang(message.from_user.id)
     settings = await db.get_balance_settings()
     raw = message.text.strip().replace(".", "").replace(",", "").replace(" ", "")

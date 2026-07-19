@@ -1,6 +1,7 @@
-"""Text-to-image generation: /generate, ForceReply prompt flow, size selection."""
+"""Text-to-image generation: /generate, FSM prompt flow, size selection."""
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
 import db
@@ -9,6 +10,7 @@ import cubence
 from i18n import t
 from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE
 from tgutil import safe_edit, ProgressAnimator
+from states import GenerateStates
 
 router = Router()
 
@@ -106,23 +108,18 @@ async def cmd_generate(message: Message):
     await _do_generate(message, prompt)
 
 
-# Reply to the ForceReply "type a prompt" message => treat as a generate request.
-async def _is_prompt_reply(message: Message) -> bool:
-    rt = message.reply_to_message
-    return bool(rt and rt.from_user and rt.from_user.is_bot and
-                ("Buat Gambar" in (rt.text or "") or "Generate Image" in (rt.text or "")))
-
-
-@router.message(F.reply_to_message, F.text, ~F.text.startswith("/"), _is_prompt_reply)
-async def reply_prompt(message: Message):
+# Reply while in the "type a prompt" state => treat as a generate request.
+@router.message(GenerateStates.waiting_prompt, F.text, ~F.text.startswith("/"))
+async def fsm_prompt(message: Message, state: FSMContext):
+    await state.clear()
     await _do_generate(message, message.text.strip())
 
 
-# Fallback: plain free-typed text (not a command, not a reply to any bot message)
-# is treated directly as a generate prompt. This covers users who just type an
-# idea without pressing "Buat Gambar" / using /generate first — previously such
-# messages were silently dropped by the dispatcher (no handler matched → no
-# response at all, looked like the bot was "broken").
-@router.message(F.text, ~F.text.startswith("/"), F.reply_to_message.is_(None))
+# Fallback: plain free-typed text (not a command, no active FSM state) is
+# treated directly as a generate prompt. StateFilter(None) is critical — without
+# it this catch-all would match even while the user is inside another flow's
+# state (edit / custom top-up) and swallow the message before those handlers
+# (registered in later routers) can run.
+@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def free_text_prompt(message: Message):
     await _do_generate(message, message.text.strip())

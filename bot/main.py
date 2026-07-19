@@ -5,6 +5,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 import db
@@ -37,7 +38,7 @@ async def main():
         token=config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
     # Subscription gate applies to messages and callbacks
     sub_mw = SubscriptionMiddleware()

@@ -1,7 +1,8 @@
 """/start, /help, /quota, main-menu navigation, language switch, and 'check subscription' callback."""
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, ForceReply
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, CallbackQuery
 
 import db
 import ui
@@ -9,6 +10,7 @@ from i18n import t
 from config import REQUIRED_CHANNEL, DEFAULT_DAILY_LIMIT, DEFAULT_SIZE
 from middlewares.subscription import is_subscribed
 from tgutil import safe_edit
+from states import GenerateStates, EditStates
 
 router = Router()
 
@@ -18,7 +20,8 @@ async def _lang(user_id: int) -> str:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()  # exit any active FSM state
     u = message.from_user
     # NOTE: user upsert + referral deep-link capture happens in
     # SubscriptionMiddleware (runs before this handler, even for users who
@@ -107,16 +110,18 @@ async def nav_size(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "menu:gen")
-async def nav_gen(callback: CallbackQuery):
+async def nav_gen(callback: CallbackQuery, state: FSMContext):
     lang = await _lang(callback.from_user.id)
-    await callback.message.answer(ui.prompt_ask(lang), reply_markup=ForceReply(input_field_placeholder="..."))
+    await state.set_state(GenerateStates.waiting_prompt)
+    await callback.message.answer(ui.prompt_ask(lang))
     await callback.answer()
 
 
 @router.callback_query(F.data == "menu:edit")
-async def nav_edit(callback: CallbackQuery):
+async def nav_edit(callback: CallbackQuery, state: FSMContext):
     lang = await _lang(callback.from_user.id)
-    await callback.message.answer(ui.edit_ask(lang), reply_markup=ForceReply(input_field_placeholder="..."))
+    await state.set_state(EditStates.waiting_instruction)
+    await callback.message.answer(ui.edit_ask(lang))
     await callback.answer()
 
 
