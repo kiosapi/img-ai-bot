@@ -10,19 +10,21 @@ from aiogram.types import BotCommand
 import db
 import config
 from middlewares.subscription import SubscriptionMiddleware
-from handlers import start, generate, edit, premium
+from handlers import start, generate, edit, premium, balance
 
 logging.basicConfig(level=logging.INFO)
 
 
 async def _set_commands(bot: Bot):
     await bot.set_my_commands([
-        BotCommand(command="start", description="🏠 Menu utama"),
-        BotCommand(command="generate", description="🎨 Buat gambar dari teks"),
-        BotCommand(command="size", description="📐 Pilih ukuran gambar"),
-        BotCommand(command="quota", description="📊 Cek kuota harian"),
-        BotCommand(command="upgrade", description="💎 Upgrade ke Premium"),
-        BotCommand(command="help", description="❓ Bantuan"),
+        BotCommand(command="start", description="🏠 Menu utama / Main menu"),
+        BotCommand(command="generate", description="🎨 Buat gambar / Generate image"),
+        BotCommand(command="size", description="📐 Ukuran / Size"),
+        BotCommand(command="quota", description="📊 Kuota / Quota"),
+        BotCommand(command="balance", description="💰 Saldo / Balance"),
+        BotCommand(command="upgrade", description="💎 Premium"),
+        BotCommand(command="lang", description="🌐 Bahasa / Language"),
+        BotCommand(command="help", description="❓ Bantuan / Help"),
     ])
 
 
@@ -46,6 +48,7 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(generate.router)
     dp.include_router(premium.router)
+    dp.include_router(balance.router)
     dp.include_router(edit.router)
 
     logging.info("Bot starting (polling)...")

@@ -26,12 +26,14 @@ imgbot/
 │   ├── config.py                # Env vars (BOT_TOKEN, CUBENCE_*, ADMIN_IDS, dll)
 │   ├── db.py                    # Layer asyncpg — SEMUA query database bot ada di sini
 │   ├── cubence.py               # Client HTTP ke Cubence API (generate/edit image)
-│   ├── ui.py                     # SEMUA template teks + inline keyboard bot (termasuk premium UI)
+│   ├── ui.py                     # SEMUA template teks + inline keyboard bot (pakai i18n.t() untuk bilingual)
+│   ├── i18n.py                    # Kamus teks id/en + fungsi t(key, lang, **kwargs) — auto-detect dari Telegram language_code, tersimpan di users.lang
 │   ├── handlers/
-│   │   ├── start.py             # /start, /help, /menu, /quota, /upgrade, navigasi menu utama
+│   │   ├── start.py             # /start, /help, /menu, /quota, /balance, /lang, navigasi menu utama, switch bahasa
 │   │   ├── generate.py          # /generate, ForceReply prompt flow, size selection, check_and_consume()
 │   │   ├── edit.py               # Edit foto (kirim foto+caption)
-│   │   └── premium.py           # Flow upgrade: pilih plan → pilih metode bayar → submit bukti
+│   │   ├── premium.py           # Flow upgrade: pilih plan → beli INSTAN pakai saldo (potong otomatis, no approval manual)
+│   │   └── balance.py            # Flow saldo: /balance → pilih nominal (quick/custom) → pilih metode bayar → upload bukti → nunggu approve admin
 │   └── middlewares/
 │       └── subscription.py      # Force-subscribe gate (cek user join channel)
 │
@@ -52,7 +54,9 @@ imgbot/
 │       │       ├── settings/page.tsx      # Daily limit, maintenance toggle
 │       │       ├── orders/page.tsx        # Pesanan premium: lihat bukti, approve/reject
 │       │       ├── plans/page.tsx         # CRUD paket premium
-│       │       └── payments/page.tsx      # CRUD metode pembayaran (bank/e-wallet/QRIS)
+│       │       ├── payments/page.tsx      # CRUD metode pembayaran (bank/e-wallet/QRIS)
+│       │       ├── deposits/page.tsx      # Approve/reject deposit saldo, lihat bukti
+│       │       └── balance-settings/page.tsx  # Toggle fitur saldo, min/max nominal, quick amounts
 │       └── components/
 │           ├── shell.tsx         # Layout utama: sidebar desktop + header/drawer mobile
 │           └── ui/                # button, card, controls (Input/Textarea/Badge/Switch), modal
@@ -104,10 +108,20 @@ Kalau nambah dependency baru: cek versi stable terbaru dulu (`npm view <pkg> ver
 - Menu utama interaktif full inline-keyboard (bukan cuma command polos)
 - Maintenance mode toggle (dari dashboard, bot cek `is_maintenance()` sebelum generate/edit)
 - **Sistem Premium/VIP:**
-  - `/upgrade` atau tombol → pilih paket → pilih metode bayar → lihat instruksi (rekening/QRIS) → user upload foto bukti transfer → order masuk status `pending`
-  - Admin dapat notifikasi Telegram otomatis pas ada order + bukti masuk
+  - `/upgrade` atau tombol → pilih paket → **beli instan pakai saldo** (potong otomatis, tanpa approval manual — kalau saldo cukup langsung aktif)
+  - Kalau saldo kurang: bot kasih tahu selisihnya + tombol langsung ke Top Up Saldo
   - `/quota` nampilin status Premium (nama paket + tanggal expired) kalau aktif
   - Kuota **premium-aware**: user premium pakai limit dari paketnya (bisa lebih besar / unlimited jika `daily_limit=0`), user free pakai limit global
+- **Sistem Saldo Akun (Balance):**
+  - `/balance` atau tombol **Saldo Saya** → lihat saldo, riwayat deposit
+  - **Top Up**: pilih nominal (quick-amount dari dashboard atau custom) → pilih metode bayar → lihat instruksi rekening/QRIS → upload foto bukti → status `pending`, admin dapat notifikasi Telegram otomatis
+  - Admin approve di dashboard (halaman **Deposit**) → saldo user bertambah otomatis + notifikasi Telegram ke user
+  - Setiap perubahan saldo (topup/beli paket/adjust manual admin) tercatat di `balance_logs` — bisa dilihat riwayatnya di halaman **User Detail**
+  - Admin bisa **manual tambah/kurangi saldo** user langsung dari dashboard (User Detail → Tambah/Kurangi Saldo), dengan catatan opsional
+- **Multi-bahasa (ID/EN):**
+  - Auto-detect dari `language_code` Telegram user pas `/start` pertama kali → disimpan di `users.lang`
+  - User bisa ganti manual kapan saja lewat `/lang` atau tombol **Bahasa** di menu utama
+  - Semua teks bot (menu, quota, premium, saldo, error) full bilingual lewat `bot/i18n.py` — dashboard admin TETAP bahasa Indonesia saja (scope i18n cuma bot, bukan dashboard)
 
 ### Dashboard Admin (Next.js, http://43.163.114.44:8000)
 - Login (session cookie based, FastAPI backend)
@@ -120,18 +134,22 @@ Kalau nambah dependency baru: cek versi stable terbaru dulu (`npm view <pkg> ver
 - **Pesanan (Orders)** — lihat semua order premium per status (pending/approved/rejected), lihat foto bukti transfer (di-proxy dari Telegram file API), tombol **Setujui** (aktivasi premium otomatis + notif user) / **Tolak** (dengan alasan, notif user)
 - **Paket (Plans)** — CRUD paket premium: nama, harga (Rp), kuota harian (0=unlimited), masa aktif (hari), deskripsi, aktif/nonaktif
 - **Pembayaran (Payments)** — CRUD metode bayar: tipe (bank/e-wallet/qris/lainnya), nama, no rekening/ID, atas nama, instruksi, QR image (file_id Telegram)
+- **Deposit** — daftar semua deposit saldo per status (pending/approved/rejected), lihat foto bukti transfer, tombol **Setujui** (saldo user bertambah otomatis + notif) / **Tolak** (dengan alasan, notif user)
+- **Pengaturan Saldo** — toggle on/off fitur saldo, atur nominal min/max, kelola daftar quick-amount (chip nominal cepat di bot) — semua editable dari dashboard tanpa sentuh kode
 - Dark/Light mode, **SVG icon only (no emoji)**, responsive
 - **Mobile nav:** header (hamburger kiri, judul tengah, toggle tema kanan) → tap hamburger buka **slide-out drawer** dari kiri (BUKAN bottom tab bar — user eksplisit minta ini karena 9 menu kepenuhan di bottom bar)
 - Desktop: sidebar fixed kiri, grup "Umum" + "Premium"
 
 ### Database (PostgreSQL, tabel utama)
-- `users` — user_id, username, first_name, is_banned, pref_size, premium_until, plan_id, plan_name, created_at, last_seen
+- `users` — user_id, username, first_name, is_banned, pref_size, premium_until, plan_id, plan_name, **balance** (saldo, BIGINT IDR), **lang** (id/en), created_at, last_seen
 - `usage_daily` — counter generate harian per user
 - `generations` — log tiap generate/edit (prompt, size, success, created_at)
-- `settings` — key-value (daily_limit, maintenance, dll)
+- `settings` — key-value (daily_limit, maintenance, `balance_enabled`, `deposit_min`, `deposit_max`, `deposit_quick_amounts`, dll)
 - `plans` — paket premium (name, daily_limit, price, duration_days, description, is_active, sort_order)
-- `payment_methods` — metode bayar (type, name, account_name, account_number, instructions, qr_image, is_active, sort_order)
-- `orders` — pesanan premium (user_id, plan_id, method_id, snapshot plan/method, amount, proof_file_id, status pending/approved/rejected, note, decided_at)
+- `payment_methods` — metode bayar (type, name, account_name, account_number, instructions, qr_image, is_active, sort_order) — dipakai bareng oleh Premium & Deposit
+- `orders` — pesanan premium (user_id, plan_id, method_id, snapshot plan/method, amount, proof_file_id, status pending/approved/rejected, note, decided_at). Order yang dibayar pakai saldo otomatis masuk sini dengan `method_name='Saldo'` dan `status='approved'` langsung.
+- `deposits` — deposit saldo (user_id, method_id, method_name snapshot, amount, proof_file_id, status pending/approved/rejected, note, decided_at)
+- `balance_logs` — audit trail tiap perubahan saldo (user_id, delta, balance_after, reason, created_at) — sumber data halaman "Riwayat" di User Detail
 
 Semua migration pakai `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` di `_create_schema()` — aman dijalankan berkali-kali di DB yang sudah ada data.
 
@@ -139,15 +157,15 @@ Semua migration pakai `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` di `_create_sch
 
 ## 🚧 Yang SEDANG/BELUM dikerjakan
 
-Tidak ada task aktif yang menggantung saat AGENTS.md ini dibuat — semua yang direncanakan sudah selesai & di-push ke GitHub (commit `0ef81c8`).
+Tidak ada task aktif yang menggantung saat AGENTS.md ini di-update terakhir kali.
 
 Ide fitur yang PERNAH disarankan tapi belum diminta user (JANGAN kerjakan kecuali diminta eksplisit):
 - Tombol "Regenerate" (buat ulang dengan prompt sama)
 - Style presets (anime/realistis/3D/dll)
 - Riwayat "Karya Saya" untuk user (catatan: gambar TIDAK disimpan di VPS — kalau mau fitur ini, pakai `file_id` Telegram, bukan simpan file, biar tetap zero storage cost)
 - Sistem referral / bonus kuota ajak teman
-- Multi-bahasa (ID/EN auto-detect)
 - Feedback 👍/👎 di hasil gambar
+- Metode top up otomatis (payment gateway/webhook) — saat ini SEMUA top up masih manual (upload bukti → admin approve)
 
 ---
 

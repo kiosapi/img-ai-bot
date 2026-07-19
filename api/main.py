@@ -126,13 +126,13 @@ async def list_users(q: str = "", _: bool = Depends(require_auth)):
         if q:
             like = f"%{q}%"
             rows = await con.fetch(
-                "SELECT u.user_id,u.username,u.first_name,u.is_banned,u.created_at,"
+                "SELECT u.user_id,u.username,u.first_name,u.is_banned,u.created_at,u.balance,u.lang,"
                 "count(g.id) AS gen_count FROM users u LEFT JOIN generations g ON g.user_id=u.user_id "
                 "WHERE u.username ILIKE $1 OR u.first_name ILIKE $1 OR CAST(u.user_id AS TEXT) LIKE $1 "
                 "GROUP BY u.user_id ORDER BY gen_count DESC LIMIT 200", like)
         else:
             rows = await con.fetch(
-                "SELECT u.user_id,u.username,u.first_name,u.is_banned,u.created_at,"
+                "SELECT u.user_id,u.username,u.first_name,u.is_banned,u.created_at,u.balance,u.lang,"
                 "count(g.id) AS gen_count FROM users u LEFT JOIN generations g ON g.user_id=u.user_id "
                 "GROUP BY u.user_id ORDER BY gen_count DESC LIMIT 200")
     return [dict(r) for r in rows]
@@ -540,3 +540,178 @@ async def premium_stats(_: bool = Depends(require_auth)):
         approved = await con.fetchval("SELECT count(*) FROM orders WHERE status='approved'") or 0
     return {"active_premium": active, "pending_orders": pending,
             "total_revenue": revenue, "total_approved": approved}
+
+
+# ==================== BALANCE: Settings ====================
+class BalanceSettingsBody(BaseModel):
+    enabled: bool = True
+    min_amount: int = 10000
+    max_amount: int = 5000000
+    quick_amounts: list[int] = [10000, 25000, 50000, 100000, 250000]
+
+
+@app.get("/api/balance/settings")
+async def get_balance_settings(_: bool = Depends(require_auth)):
+    enabled = await get_setting("balance_enabled", "1")
+    min_amount = await get_setting("deposit_min", "10000")
+    max_amount = await get_setting("deposit_max", "5000000")
+    quick_raw = await get_setting("deposit_quick_amounts", "10000,25000,50000,100000,250000")
+    try:
+        quick = [int(x) for x in quick_raw.split(",") if x.strip()]
+    except ValueError:
+        quick = [10000, 25000, 50000, 100000, 250000]
+    return {"enabled": enabled == "1", "min_amount": int(min_amount),
+            "max_amount": int(max_amount), "quick_amounts": quick}
+
+
+@app.post("/api/balance/settings")
+async def save_balance_settings(body: BalanceSettingsBody, _: bool = Depends(require_auth)):
+    if body.min_amount < 0 or body.max_amount < body.min_amount:
+        raise HTTPException(status_code=400, detail="Rentang nominal tidak valid")
+    await set_setting("balance_enabled", "1" if body.enabled else "0")
+    await set_setting("deposit_min", max(0, body.min_amount))
+    await set_setting("deposit_max", max(0, body.max_amount))
+    quick = sorted({int(x) for x in body.quick_amounts if x > 0})
+    await set_setting("deposit_quick_amounts", ",".join(str(x) for x in quick))
+    return {"ok": True}
+
+
+# ==================== BALANCE: Deposits ====================
+@app.get("/api/deposits")
+async def list_deposits(status: str = "", _: bool = Depends(require_auth)):
+    q = ("SELECT d.*, u.username, u.first_name FROM deposits d "
+         "LEFT JOIN users u ON u.user_id=d.user_id ")
+    args = []
+    if status in ("pending", "approved", "rejected"):
+        q += "WHERE d.status=$1 "
+        args.append(status)
+    q += "ORDER BY d.id DESC LIMIT 200"
+    async with _pool.acquire() as con:
+        rows = await con.fetch(q, *args)
+        counts = await con.fetch("SELECT status, count(*) c FROM deposits GROUP BY status")
+    cmap = {r["status"]: r["c"] for r in counts}
+    return {"deposits": [dict(r) for r in rows],
+            "counts": {"pending": cmap.get("pending", 0), "approved": cmap.get("approved", 0),
+                       "rejected": cmap.get("rejected", 0)}}
+
+
+@app.get("/api/deposits/stats")
+async def deposit_stats(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        pending = await con.fetchval("SELECT count(*) FROM deposits WHERE status='pending'") or 0
+        total_in = await con.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status='approved'") or 0
+        approved = await con.fetchval("SELECT count(*) FROM deposits WHERE status='approved'") or 0
+        total_balance = await con.fetchval("SELECT COALESCE(SUM(balance),0) FROM users") or 0
+    return {"pending_deposits": pending, "total_deposited": total_in,
+            "total_approved": approved, "total_balance_outstanding": total_balance}
+
+
+@app.get("/api/deposits/{did}/proof")
+async def deposit_proof(did: int, _: bool = Depends(require_auth)):
+    """Proxy the Telegram proof photo so the dashboard can display it."""
+    from fastapi.responses import Response as FResponse
+    async with _pool.acquire() as con:
+        fid = await con.fetchval("SELECT proof_file_id FROM deposits WHERE id=$1", did)
+    if not fid:
+        raise HTTPException(status_code=404, detail="Belum ada bukti")
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": fid})
+        path = r.json()["result"]["file_path"]
+        img = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
+    return FResponse(content=img.content, media_type="image/jpeg")
+
+
+@app.post("/api/deposits/{did}/approve")
+async def approve_deposit(did: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        async with con.transaction():
+            d = await con.fetchrow("SELECT * FROM deposits WHERE id=$1 FOR UPDATE", did)
+            if not d:
+                raise HTTPException(status_code=404, detail="Deposit tidak ditemukan")
+            if d["status"] != "pending":
+                raise HTTPException(status_code=400, detail="Deposit sudah diproses")
+            new_balance_row = await con.fetchrow(
+                "UPDATE users SET balance = balance + $2 WHERE user_id=$1 RETURNING balance",
+                d["user_id"], d["amount"])
+            if not new_balance_row:
+                await con.execute(
+                    "INSERT INTO users (user_id, balance) VALUES ($1, $2) "
+                    "ON CONFLICT (user_id) DO UPDATE SET balance = users.balance + $2",
+                    d["user_id"], d["amount"])
+                new_balance_row = await con.fetchrow("SELECT balance FROM users WHERE user_id=$1", d["user_id"])
+            new_balance = new_balance_row["balance"]
+            await con.execute(
+                "INSERT INTO balance_logs (user_id, delta, balance_after, reason) VALUES ($1,$2,$3,$4)",
+                d["user_id"], d["amount"], new_balance, f"Deposit #{did} disetujui")
+            await con.execute(
+                "UPDATE deposits SET status='approved', decided_at=now() WHERE id=$1", did)
+    await _notify_user(d["user_id"],
+        "🎉 <b>Top up berhasil!</b>\n\n"
+        f"💰 Nominal: <b>{_rupiah(d['amount'])}</b>\n"
+        f"💳 Saldo sekarang: <b>{_rupiah(new_balance)}</b>\n\n"
+        "Terima kasih! 🙏")
+    return {"ok": True, "new_balance": new_balance}
+
+
+@app.post("/api/deposits/{did}/reject")
+async def reject_deposit(did: int, body: DecisionBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        d = await con.fetchrow("SELECT * FROM deposits WHERE id=$1", did)
+        if not d:
+            raise HTTPException(status_code=404, detail="Deposit tidak ditemukan")
+        if d["status"] != "pending":
+            raise HTTPException(status_code=400, detail="Deposit sudah diproses")
+        await con.execute(
+            "UPDATE deposits SET status='rejected', note=$2, decided_at=now() WHERE id=$1",
+            did, body.note)
+    txt = "❌ <b>Deposit ditolak</b>\n\nMaaf, top up tidak dapat diverifikasi."
+    if body.note:
+        txt += f"\n\n📝 Catatan admin: <i>{body.note}</i>"
+    txt += "\n\nSilakan coba lagi atau hubungi admin ya 🙏"
+    await _notify_user(d["user_id"], txt)
+    return {"ok": True}
+
+
+# ==================== BALANCE: Manual adjust (admin) ====================
+class BalanceAdjustBody(BaseModel):
+    user_id: int
+    delta: int  # positive to add, negative to deduct
+    reason: str = "Penyesuaian manual admin"
+    notify: bool = True
+
+
+@app.post("/api/users/balance/adjust")
+async def adjust_user_balance(body: BalanceAdjustBody, _: bool = Depends(require_auth)):
+    if body.delta == 0:
+        raise HTTPException(status_code=400, detail="Nilai penyesuaian tidak boleh 0")
+    async with _pool.acquire() as con:
+        async with con.transaction():
+            row = await con.fetchrow(
+                "UPDATE users SET balance = balance + $2 WHERE user_id=$1 RETURNING balance",
+                body.user_id, body.delta)
+            if not row:
+                raise HTTPException(status_code=404, detail="User tidak ditemukan")
+            new_balance = row["balance"]
+            if new_balance < 0:
+                raise HTTPException(status_code=400, detail="Saldo tidak boleh negatif")
+            await con.execute(
+                "INSERT INTO balance_logs (user_id, delta, balance_after, reason) VALUES ($1,$2,$3,$4)",
+                body.user_id, body.delta, new_balance, body.reason)
+    if body.notify:
+        sign = "+" if body.delta > 0 else ""
+        await _notify_user(body.user_id,
+            f"ℹ️ <b>Saldo kamu disesuaikan admin</b>\n\n"
+            f"Perubahan: <b>{sign}{_rupiah(body.delta)}</b>\n"
+            f"Saldo sekarang: <b>{_rupiah(new_balance)}</b>\n"
+            f"Catatan: <i>{body.reason}</i>")
+    return {"ok": True, "new_balance": new_balance}
+
+
+@app.get("/api/users/{uid}/balance/logs")
+async def user_balance_logs(uid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT id, delta, balance_after, reason, created_at FROM balance_logs "
+            "WHERE user_id=$1 ORDER BY id DESC LIMIT 50", uid)
+    return {"logs": [dict(r) for r in rows]}

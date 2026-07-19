@@ -6,6 +6,7 @@ from aiogram.types import Message, BufferedInputFile
 import db
 import ui
 import cubence
+from i18n import t
 from handlers.generate import check_and_consume, _size_of, is_maintenance
 
 router = Router()
@@ -13,24 +14,25 @@ router = Router()
 
 @router.message(F.photo)
 async def handle_photo(message: Message):
+    lang = await db.get_lang(message.from_user.id)
     prompt = (message.caption or "").strip()
     if not prompt:
-        await message.answer(ui.edit_ask())
+        await message.answer(ui.edit_ask(lang))
         return
 
     if await is_maintenance():
-        await message.answer("🛠️ <b>Bot sedang maintenance</b>\nCoba lagi beberapa saat ya.")
+        await message.answer(t("maintenance", lang))
         return
 
     allowed, used, limit = await check_and_consume(message.from_user.id)
     if not allowed:
         await message.answer(
-            f"🚫 <b>Kuota harian habis</b> ({used}/{limit})\n{ui.quota_bar(used, limit)}\n\nReset otomatis besok 🔄",
-            reply_markup=ui.back_menu())
+            t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)),
+            reply_markup=ui.back_menu(lang))
         return
 
     size = await _size_of(message.from_user.id)
-    status = await message.answer(f"🖌️ <b>Mengedit gambar...</b>\n⏳ Mohon tunggu sebentar ({used}/{limit})")
+    status = await message.answer(t("editing", lang, used=used, limit=limit))
     try:
         photo = message.photo[-1]  # highest resolution
         buf = io.BytesIO()
@@ -40,17 +42,13 @@ async def handle_photo(message: Message):
         img = await cubence.edit_image(image_bytes, prompt, size=size)
         await message.answer_photo(
             BufferedInputFile(img, filename="edited.png"),
-            caption=(
-                f"✅ <b>Edit selesai!</b>\n\n"
-                f"📝 <i>{prompt[:200]}</i>\n"
-                f"📐 {size}  ·  📊 Sisa {ui.sisa_text(used, limit)}"
-            ),
-            reply_markup=ui.result_menu(),
+            caption=t("edit_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
+            reply_markup=ui.result_menu(lang),
         )
         await db.log_generation(message.from_user.id, "edit", prompt, size, True)
     except cubence.CubenceError as e:
         await db.log_generation(message.from_user.id, "edit", prompt, size, False)
-        await message.answer(f"❌ <b>Gagal mengedit gambar</b>\n<code>{e}</code>", reply_markup=ui.back_menu())
+        await message.answer(t("edit_failed", lang, err=e), reply_markup=ui.back_menu(lang))
     finally:
         try:
             await status.delete()

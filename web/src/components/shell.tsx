@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
-import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X } from "lucide-react";
+import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X, Wallet, ArrowDownToLine } from "lucide-react";
 import { cn, api } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
@@ -25,6 +25,13 @@ const groups = [
       { href: "/orders", label: "Pesanan", icon: Receipt },
       { href: "/plans", label: "Paket", icon: Crown },
       { href: "/payments", label: "Pembayaran", icon: CreditCard },
+    ],
+  },
+  {
+    title: "Saldo",
+    items: [
+      { href: "/deposits", label: "Deposit", icon: ArrowDownToLine },
+      { href: "/balance-settings", label: "Pengaturan Saldo", icon: Wallet },
     ],
   },
 ];

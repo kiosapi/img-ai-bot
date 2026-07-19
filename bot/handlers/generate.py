@@ -6,6 +6,7 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 import db
 import ui
 import cubence
+from i18n import t
 from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE
 
 router = Router()
@@ -32,50 +33,48 @@ async def check_and_consume(user_id: int) -> tuple[bool, int, int]:
 # ---------------- Size selection ----------------
 @router.message(Command("size"))
 async def cmd_size(message: Message):
+    lang = await db.get_lang(message.from_user.id)
     current = await db.get_pref_size(message.from_user.id, DEFAULT_SIZE)
-    await message.answer("📐 <b>Pilih Ukuran Gambar</b>", reply_markup=ui.size_menu(current))
+    await message.answer(t("size_pick", lang), reply_markup=ui.size_menu(current, lang))
 
 
 @router.callback_query(F.data.startswith("size:"))
 async def set_size(callback: CallbackQuery):
+    lang = await db.get_lang(callback.from_user.id)
     size = callback.data.split(":", 1)[1]
     if size in ALLOWED_SIZES:
         await db.set_pref_size(callback.from_user.id, size)
-        await callback.message.edit_text(
-            f"✅ Ukuran diset ke <b>{size}</b>", reply_markup=ui.back_menu())
-    await callback.answer("Ukuran tersimpan ✓")
+        await callback.message.edit_text(t("size_set", lang, size=size), reply_markup=ui.back_menu(lang))
+    await callback.answer(t("size_saved", lang))
 
 
 # ---------------- Core generation ----------------
 async def _do_generate(message: Message, prompt: str):
+    lang = await db.get_lang(message.from_user.id)
     if await is_maintenance():
-        await message.answer("🛠️ <b>Bot sedang maintenance</b>\nCoba lagi beberapa saat ya.")
+        await message.answer(t("maintenance", lang))
         return
 
     allowed, used, limit = await check_and_consume(message.from_user.id)
     if not allowed:
         await message.answer(
-            f"🚫 <b>Kuota harian habis</b> ({used}/{limit})\n{ui.quota_bar(used, limit)}\n\nReset otomatis besok 🔄",
-            reply_markup=ui.back_menu())
+            t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)),
+            reply_markup=ui.back_menu(lang))
         return
 
     size = await _size_of(message.from_user.id)
-    status = await message.answer(f"🎨 <b>Membuat gambar...</b>\n⏳ Mohon tunggu sebentar ({used}/{limit})")
+    status = await message.answer(t("generating", lang, used=used, limit=limit))
     try:
         img = await cubence.generate_image(prompt, size=size)
         await message.answer_photo(
             BufferedInputFile(img, filename="image.png"),
-            caption=(
-                f"✅ <b>Gambar selesai!</b>\n\n"
-                f"📝 <i>{prompt[:200]}</i>\n"
-                f"📐 {size}  ·  📊 Sisa {ui.sisa_text(used, limit)}"
-            ),
-            reply_markup=ui.result_menu(),
+            caption=t("gen_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
+            reply_markup=ui.result_menu(lang),
         )
         await db.log_generation(message.from_user.id, "generate", prompt, size, True)
     except cubence.CubenceError as e:
         await db.log_generation(message.from_user.id, "generate", prompt, size, False)
-        await message.answer(f"❌ <b>Gagal membuat gambar</b>\n<code>{e}</code>", reply_markup=ui.back_menu())
+        await message.answer(t("gen_failed", lang, err=e), reply_markup=ui.back_menu(lang))
     finally:
         try:
             await status.delete()
@@ -85,16 +84,21 @@ async def _do_generate(message: Message, prompt: str):
 
 @router.message(Command("generate"))
 async def cmd_generate(message: Message):
+    lang = await db.get_lang(message.from_user.id)
     prompt = message.text.partition(" ")[2].strip()
     if not prompt:
-        await message.answer(ui.prompt_ask())
+        await message.answer(ui.prompt_ask(lang))
         return
     await _do_generate(message, prompt)
 
 
-# Reply to the ForceReply "ketik prompt" message => treat as a generate request.
-@router.message(F.reply_to_message, F.text, ~F.text.startswith("/"))
-async def reply_prompt(message: Message):
+# Reply to the ForceReply "type a prompt" message => treat as a generate request.
+async def _is_prompt_reply(message: Message) -> bool:
     rt = message.reply_to_message
-    if rt and rt.from_user and rt.from_user.is_bot and "Buat Gambar" in (rt.text or ""):
-        await _do_generate(message, message.text.strip())
+    return bool(rt and rt.from_user and rt.from_user.is_bot and
+                ("Buat Gambar" in (rt.text or "") or "Generate Image" in (rt.text or "")))
+
+
+@router.message(F.reply_to_message, F.text, ~F.text.startswith("/"), _is_prompt_reply)
+async def reply_prompt(message: Message):
+    await _do_generate(message, message.text.strip())

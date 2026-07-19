@@ -8,6 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Badge } from "@/components/ui/controls";
 
+const rupiah = (n: number) => "Rp" + Number(n || 0).toLocaleString("id-ID");
+
 export default function UsersPage() {
   const [users, setUsers] = useState<any[]>([]);
   const [q, setQ] = useState("");
@@ -79,7 +81,7 @@ export default function UsersPage() {
                     {u.username ? "@" + u.username : (u.first_name || "User")}
                     {u.is_banned && <Badge variant="destructive" className="ml-2">banned</Badge>}
                   </div>
-                  <div className="text-xs text-muted-foreground">ID {u.user_id} · <Badge variant="default">{u.gen_count} gambar</Badge></div>
+                  <div className="text-xs text-muted-foreground">ID {u.user_id} · <Badge variant="default">{u.gen_count} gambar</Badge> · <Badge variant="muted">{rupiah(u.balance)}</Badge></div>
                 </Link>
               </div>
               {u.is_banned
