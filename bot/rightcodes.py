@@ -3,17 +3,23 @@
 - POST https://www.right.codes/draw/v1/images/generations {model, prompt, n, size, imageSize, image:[dataURLs], async:true}
 - -> {"task_id": "..."}
 - GET https://www.right.codes/v1/tasks/{task_id}
-- statuses: queued/in_progress -> poll, completed -> data, failed -> error
+- statuses: queued/in_progress -> poll, completed -> data (Images) or candidates (Gemini), failed -> error
+
+Fixes:
+- Gemini completed shape: candidates[].content.parts[].text = URL (not inlineData)
+- Images completed shape: data:[{url: "https://cdn..."}] (not b64)
+- robust download with retries
 """
+
 import asyncio
 import base64
 import httpx
 from typing import Optional
 
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
-POLL_INTERVAL = 2.5
-POLL_MAX = 300  # 5 min
+DOWNLOAD_TIMEOUT = httpx.Timeout(90.0, connect=10.0)
+POLL_INTERVAL = 3.0
+POLL_MAX = 400  # 6.5 min to handle 46s+ queue per user report
 
 
 class RightCodesError(Exception):
@@ -24,23 +30,43 @@ def _site_base(draw_base: str) -> str:
     b = draw_base.rstrip("/")
     if b.endswith("/draw"):
         return b[:-5]
-    # if contains /draw somewhere, strip suffix from /draw onwards
     if "/draw" in b:
         return b.split("/draw")[0]
     return b
 
 
-async def _resolve_task(api_key: str, task_id: str, site_base: str) -> dict:
-    url = f"{site_base.rstrip('/')}/v1/tasks/{task_id}"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        resp = await client.get(url, headers=headers)
-    if resp.status_code != 200:
-        raise RightCodesError(f"task poll {resp.status_code}: {resp.text[:400]}")
-    try:
-        return resp.json()
-    except Exception as e:
-        raise RightCodesError(f"poll json parse: {e}")
+async def _download_image(url: str) -> bytes:
+    """Download with retries."""
+    last_err = ""
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as dl:
+                r = await dl.get(url)
+                if r.status_code == 200 and len(r.content) > 1000:
+                    return r.content
+                last_err = f"HTTP {r.status_code} len {len(r.content)}"
+        except Exception as e:
+            last_err = str(e)
+        await asyncio.sleep(1.0 * (attempt + 1))
+    raise RightCodesError(f"Download failed {url[:80]}: {last_err}")
+
+
+def _extract_url_from_text_maybe(text: str) -> str | None:
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("http://") or t.startswith("https://"):
+        # take first token if extra text
+        return t.split()[0].strip().strip('"').strip("'")
+    # maybe contains url inside markdown? try find https
+    import re
+    m = re.search(r"https?://[^\s\"']+\.(?:png|jpg|jpeg|webp|gif)", t, re.I)
+    if m:
+        return m.group(0)
+    m = re.search(r"https?://\S+", t)
+    if m:
+        return m.group(0).strip().strip('"').strip("'").rstrip(".,)")
+    return None
 
 
 async def generate_image(
@@ -52,25 +78,13 @@ async def generate_image(
     image_size: str | None = None,
     ref_images_b64: list[bytes] | None = None,
 ) -> bytes:
-    """
-    base_url: https://www.right.codes/draw  (draw-level)
-    size: for Right Codes expected format: 1:1, 16:9, 9:16, 4:3 or 1024x1024 etc — we translate.
-    image_size: optional 1K/2K/4K for nano-banana / gpt-image vip
-    ref_images_b64: optional list of png bytes -> data URL array
-    """
     draw_base = base_url.rstrip("/")
     if not draw_base.endswith("/draw") and "/draw" not in draw_base:
         draw_base = draw_base + "/draw"
     site_base = _site_base(draw_base)
     gen_url = f"{draw_base}/v1/images/generations"
 
-    # size mapping: if bot uses 1024x1024 etc, keep as is OR map to ratio if requested.
-    # Doc says supports both ratio and pixel string. We'll pass through as-is but map common:
-    rc_size = size
-    # If pixel like 1024x1024 -> keep, but some models prefer ratio. Keep pixel for compat.
-    # If empty, default 1:1
-    if not rc_size:
-        rc_size = "1:1"
+    rc_size = size or "1:1"
 
     payload: dict = {
         "model": model_id,
@@ -89,7 +103,6 @@ async def generate_image(
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    # submit
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             resp = await client.post(gen_url, json=payload, headers=headers)
@@ -99,27 +112,25 @@ async def generate_image(
         raise RightCodesError(f"Right Codes connect fail: {e}")
 
     if resp.status_code != 200:
-        raise RightCodesError(f"Right Codes {resp.status_code}: {resp.text[:500]}")
+        raise RightCodesError(f"Right Codes {resp.status_code}: {resp.text[:800]}")
 
     try:
         j = resp.json()
         task_id = j.get("task_id") or j.get("id")
         if not task_id:
-            # maybe sync response already contains image
+            # sync fallback maybe already contains image
             if "data" in j and isinstance(j["data"], list) and len(j["data"]) > 0:
                 first = j["data"][0]
-                if "b64_json" in first:
-                    return base64.b64decode(first["b64_json"])
-                if "url" in first:
-                    url = first["url"]
-                    async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT) as dl:
-                        r = await dl.get(url)
-                        return r.content
-            raise RightCodesError(f"No task_id: {str(j)[:500]}")
+                if isinstance(first, dict):
+                    if "b64_json" in first:
+                        return base64.b64decode(first["b64_json"])
+                    if "url" in first and first["url"]:
+                        return await _download_image(first["url"])
+            raise RightCodesError(f"No task_id: {str(j)[:800]}")
     except RightCodesError:
         raise
     except Exception as e:
-        raise RightCodesError(f"Submit parse fail {e}: {resp.text[:300]}")
+        raise RightCodesError(f"Submit parse fail {e}: {resp.text[:400]}")
 
     # poll
     start = asyncio.get_event_loop().time()
@@ -130,7 +141,7 @@ async def generate_image(
         while True:
             elapsed = asyncio.get_event_loop().time() - start
             if elapsed > POLL_MAX:
-                raise RightCodesError(f"Timeout polling task {task_id} after {POLL_MAX}s")
+                raise RightCodesError(f"Timeout polling task {task_id} after {POLL_MAX}s — Right Codes dashboard may show completed but bot timed out. Try again, may be queue high.")
 
             try:
                 pr = await client.get(poll_url, headers=poll_headers)
@@ -151,77 +162,95 @@ async def generate_image(
             status = (pj.get("status") or "").lower()
 
             if status == "completed":
-                # Try Images shape
-                data = pj.get("data") or pj.get("result") or pj.get("output") or []
-                # data can be list or dict
-                if isinstance(data, dict):
-                    # may contain images array or data
-                    if "images" in data:
-                        data = data["images"]
-                    elif "data" in data:
-                        data = data["data"]
-
+                # 1) Images shape: data: [{url: "..."}] OR top-level data
+                data = pj.get("data")
                 if isinstance(data, list) and len(data) > 0:
                     first = data[0]
                     if isinstance(first, dict):
                         if "b64_json" in first:
                             return base64.b64decode(first["b64_json"])
-                        if "url" in first and first["url"]:
-                            url = first["url"]
-                            async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT) as dl:
-                                r = await dl.get(url)
-                                if r.status_code == 200:
-                                    return r.content
-                        if "image_url" in first and first["image_url"]:
-                            url = first["image_url"]
-                            async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT) as dl:
-                                r = await dl.get(url)
-                                return r.content
-                    elif isinstance(first, str) and first.startswith("http"):
-                        async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT) as dl:
-                            r = await dl.get(first)
-                            return r.content
+                        url = first.get("url") or first.get("image_url")
+                        if url:
+                            return await _download_image(url)
+                    elif isinstance(first, str):
+                        if first.startswith("http"):
+                            return await _download_image(first)
 
-                # also try direct url in top-level
-                if pj.get("url"):
-                    async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT) as dl:
-                        r = await dl.get(pj["url"])
-                        return r.content
+                # 2) top-level maybe data at root with created etc: {created, data:[{url}]}
+                if isinstance(pj.get("data"), list):
+                    dl = pj["data"]
+                    if dl and isinstance(dl[0], dict) and dl[0].get("url"):
+                        return await _download_image(dl[0]["url"])
 
-                # try candidates path for gemini? But we are Images path
+                # 3) Gemini shape: candidates[0].content.parts[].text = URL  OR inlineData
                 candidates = pj.get("candidates") or []
-                if candidates and isinstance(candidates, list):
-                    for c in candidates:
-                        # generic fallback
-                        if isinstance(c, dict):
-                            # check content parts
-                            content = c.get("content", {})
-                            parts = content.get("parts", []) if isinstance(content, dict) else []
-                            for part in parts:
-                                if isinstance(part, dict) and "inlineData" in part:
-                                    inline = part["inlineData"]
-                                    b64data = inline.get("data")
-                                    if b64data:
-                                        return base64.b64decode(b64data)
+                if isinstance(candidates, list) and candidates:
+                    for cand in candidates:
+                        content = cand.get("content", {}) if isinstance(cand, dict) else {}
+                        parts = content.get("parts", []) if isinstance(content, dict) else []
+                        for part in parts:
+                            if not isinstance(part, dict):
+                                continue
+                            # new shape: text contains URL
+                            text = part.get("text")
+                            if text:
+                                url = _extract_url_from_text_maybe(text)
+                                if url:
+                                    return await _download_image(url)
+                            # old shape: inlineData
+                            inline = part.get("inlineData")
+                            if inline and isinstance(inline, dict):
+                                b64d = inline.get("data")
+                                if b64d:
+                                    try:
+                                        return base64.b64decode(b64d)
+                                    except Exception:
+                                        pass
+                            # also check inline_data snake
+                            inline2 = part.get("inline_data")
+                            if inline2 and isinstance(inline2, dict):
+                                b64d = inline2.get("data")
+                                if b64d:
+                                    try:
+                                        return base64.b64decode(b64d)
+                                    except Exception:
+                                        pass
 
-                raise RightCodesError(f"Completed but no image parseable: {str(pj)[:1200]}")
+                # 4) direct url at top level
+                if pj.get("url"):
+                    return await _download_image(pj["url"])
+
+                # 5) result / output wrappers
+                for key in ("result", "output", "response"):
+                    val = pj.get(key)
+                    if isinstance(val, dict):
+                        # try data inside
+                        if "url" in val and val["url"]:
+                            return await _download_image(val["url"])
+                        if "data" in val and isinstance(val["data"], list) and val["data"]:
+                            first = val["data"][0]
+                            if isinstance(first, dict) and first.get("url"):
+                                return await _download_image(first["url"])
+                    if isinstance(val, list) and val:
+                        first = val[0]
+                        if isinstance(first, dict) and first.get("url"):
+                            return await _download_image(first["url"])
+                        if isinstance(first, str) and first.startswith("http"):
+                            return await _download_image(first)
+
+                raise RightCodesError(f"Completed but no image parseable. Keys: {list(pj.keys())} Data preview: {str(pj)[:1500]}")
 
             elif status == "failed":
                 err = pj.get("error") or {}
                 msg = err.get("message") if isinstance(err, dict) else str(err)
                 if not msg:
-                    msg = pj.get("message") or str(pj)[:500]
+                    msg = pj.get("message") or str(pj)[:800]
                 raise RightCodesError(f"Task failed: {msg}")
 
-            # queued / in_progress
             await asyncio.sleep(POLL_INTERVAL)
 
 
 async def list_models(api_key: str, base_url: str) -> list[dict]:
-    """
-    Try to list models — Right Codes may expose /v1/models at draw-level or site-level.
-    Returns list of {id, display_name?}
-    """
     draw_base = base_url.rstrip("/")
     if not draw_base.endswith("/draw") and "/draw" not in draw_base:
         draw_base = draw_base + "/draw"
@@ -245,11 +274,9 @@ async def list_models(api_key: str, base_url: str) -> list[dict]:
                     return j["data"]
                 if isinstance(j, list):
                     return j
-                # wrap
                 return [j]
             last_err = f"{url} {resp.status_code} {resp.text[:200]}"
         except Exception as e:
             last_err = f"{url} {e}"
             continue
     raise RightCodesError(f"list_models failed: {last_err}")
-

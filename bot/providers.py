@@ -98,7 +98,14 @@ async def _cubence_edit(api_key: str, base_url: str, model_id: str, image_bytes:
 
 async def _rc_generate(api_key: str, base_url: str, model_id: str, prompt: str, size: str) -> bytes:
     import rightcodes as rc
-    return await rc.generate_image(api_key, base_url, model_id, prompt, size)
+    import asyncio
+    try:
+        return await asyncio.wait_for(
+            rc.generate_image(api_key, base_url, model_id, prompt, size),
+            timeout=420,
+        )
+    except asyncio.TimeoutError:
+        raise ProviderError("Right Codes timeout after 7m — dashboard may show success, try /generate again image already ready on RC task page.")
 
 
 async def _rc_edit(api_key: str, base_url: str, model_id: str, image_bytes: bytes, prompt: str, size: str) -> bytes:
