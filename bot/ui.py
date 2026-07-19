@@ -353,13 +353,11 @@ def model_menu(models: list[dict], current_id: str | None, lang: str = "id"):
     for m in models:
         mid = m.get("id") or m.get("model_id") or ""
         display = m.get("display_name") or mid
-        desc = m.get("description") or ""
-        # mark current
-        prefix = "✅ " if mid == current_id else ""
-        # keep label short, no provider name
+        # mark current with text prefix, no emoji
+        prefix = "[active] " if mid == current_id else ""
         label = f"{prefix}{display}"
-        if len(label) > 40:
-            label = label[:37] + "..."
+        if len(label) > 44:
+            label = label[:41] + "..."
         kb.button(text=label, callback_data=f"model:{mid}")
     kb.button(text=t("back_home", lang), callback_data="menu:home")
     kb.adjust(2)
@@ -370,8 +368,7 @@ def model_menu(models: list[dict], current_id: str | None, lang: str = "id"):
 def sticker_menu(packs: list[dict], lang: str = "id", can_create: bool = True):
     kb = InlineKeyboardBuilder()
     for p in packs:
-        kb.button(text=f"📦 {p['pack_name']} ({p.get('sticker_count',0)})", callback_data=f"sticker:view:{p['pack_name']}")
-    # link to explore? just back
+        kb.button(text=f"{p['pack_name']} ({p.get('sticker_count',0)})", callback_data=f"sticker:view:{p['pack_name']}")
     kb.button(text=t("back_home", lang), callback_data="menu:home")
     kb.adjust(1)
     return kb.as_markup()

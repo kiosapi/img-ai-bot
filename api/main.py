@@ -32,8 +32,52 @@ async def lifespan(app: FastAPI):
             " created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
             " expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '7 days')"
         )
-        # cleanup expired sessions on startup
         await con.execute("DELETE FROM admin_sessions WHERE expires_at < now()")
+        # --- auto-migrate ENV API keys -> settings table if not present (fix X status) ---
+        try:
+            env_cub_key = os.environ.get("CUBENCE_API_KEY", "").strip()
+            env_cub_base = os.environ.get("CUBENCE_BASE_URL", "").strip()
+            if env_cub_key:
+                await con.execute(
+                    "INSERT INTO settings (key,value) VALUES ('cubence_api_key',$1) ON CONFLICT (key) DO NOTHING",
+                    env_cub_key,
+                )
+            if env_cub_base:
+                await con.execute(
+                    "INSERT INTO settings (key,value) VALUES ('cubence_base_url',$1) ON CONFLICT (key) DO NOTHING",
+                    env_cub_base,
+                )
+            env_rc_key = os.environ.get("RIGHTCODES_API_KEY", os.environ.get("RIGHT_CODES_API_KEY", "")).strip()
+            env_rc_base = os.environ.get("RIGHTCODES_BASE_URL", os.environ.get("RIGHT_CODES_BASE_URL", "")).strip()
+            if env_rc_key:
+                await con.execute(
+                    "INSERT INTO settings (key,value) VALUES ('rightcodes_api_key',$1) ON CONFLICT (key) DO NOTHING",
+                    env_rc_key,
+                )
+            if env_rc_base:
+                await con.execute(
+                    "INSERT INTO settings (key,value) VALUES ('rightcodes_base_url',$1) ON CONFLICT (key) DO NOTHING",
+                    env_rc_base,
+                )
+            # ensure default base_url settings if missing
+            await con.execute(
+                "INSERT INTO settings (key,value) VALUES ('rightcodes_base_url','https://www.right.codes/draw') ON CONFLICT (key) DO NOTHING"
+            )
+            await con.execute(
+                "INSERT INTO settings (key,value) VALUES ('cubence_base_url','https://api-dmit.cubence.com') ON CONFLICT (key) DO NOTHING"
+            )
+            # --- production fix: model ID collision across providers ---
+            # add external_id column if missing
+            await con.execute("ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS external_id TEXT;")
+            # backfill external_id from id for old rows where external_id null
+            await con.execute("UPDATE ai_models SET external_id = id WHERE external_id IS NULL;")
+            # ensure providers table has base_url fallback from settings
+            await con.execute(
+                "UPDATE providers SET base_url = COALESCE((SELECT value FROM settings WHERE key = providers.id || '_base_url'), base_url) WHERE base_url IS NULL OR base_url = ''"
+            )
+        except Exception as _e:
+            # don't crash startup
+            print(f"warn lifespan migration: {_e}")
     yield
     if _pool:
         await _pool.close()
@@ -452,7 +496,7 @@ class ApiKeySaveBody(BaseModel):
 
 
 class ModelSaveBody(BaseModel):
-    id: str
+    id: str  # can be real model id like gpt-image-2 OR composite cubence:gpt-image-2
     provider_id: str
     display_name: str
     description: str | None = None
@@ -460,6 +504,22 @@ class ModelSaveBody(BaseModel):
     is_default: bool = False
     sort_order: int = 0
     capabilities: dict | None = None
+    external_id: str | None = None  # if not provided, derived from id
+
+
+def _normalize_model_ids(raw_id: str, provider_id: str, external_id: str | None = None) -> tuple[str, str]:
+    """Return (internal_id, external_id) where internal_id = provider:external collision-safe"""
+    ext = external_id or raw_id
+    # if raw_id already composite provider:ext, keep
+    if ":" in raw_id:
+        parts = raw_id.split(":", 1)
+        # if first part matches provider, use as is
+        if parts[0] == provider_id:
+            return raw_id, parts[1]
+        # else treat raw_id as external anyway
+    ext_clean = ext.split(":", 1)[-1] if ":" in ext else ext
+    internal = f"{provider_id}:{ext_clean}"
+    return internal, ext_clean
 
 
 @app.get("/api/providers")
@@ -473,11 +533,8 @@ async def api_list_providers(_: bool = Depends(require_auth)):
     for r in rows:
         d = dict(r)
         pid = d["id"]
-        # keys: {pid}_api_key  e.g. cubence_api_key, rightcodes_api_key
         ak_key = f"{pid}_api_key"
         bu_key = f"{pid}_base_url"
-        has_key = bool(smap.get(ak_key) or smap.get(f"cubence_api_key") if pid == "cubence" else smap.get(ak_key))
-        # mask
         raw_key = smap.get(ak_key, "")
         masked = (raw_key[:6] + "***" + raw_key[-4:]) if len(raw_key) > 10 else ("***" if raw_key else "")
         out.append({**d, "has_api_key": bool(raw_key), "api_key_masked": masked, "api_key_setting_key": ak_key, "base_url_setting": smap.get(bu_key, d.get("base_url", ""))})
@@ -511,21 +568,21 @@ async def api_list_models(_: bool = Depends(require_auth)):
 async def api_save_model(body: ModelSaveBody, _: bool = Depends(require_auth)):
     import json as _json
     async with _pool.acquire() as con:
-        # validate provider exists
         prov = await con.fetchrow("SELECT id FROM providers WHERE id=$1", body.provider_id)
         if not prov:
             raise HTTPException(status_code=400, detail=f"Provider {body.provider_id} tidak ditemukan")
         if body.is_default:
             await con.execute("UPDATE ai_models SET is_default=false WHERE provider_id=$1", body.provider_id)
+        internal_id, external_id = _normalize_model_ids(body.id, body.provider_id, body.external_id)
         await con.execute(
             """
-            INSERT INTO ai_models (id, provider_id, display_name, description, is_active, is_default, sort_order, capabilities, updated_at)
+            INSERT INTO ai_models (id, provider_id, external_id, display_name, description, is_active, is_default, sort_order, capabilities, updated_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb, now())
-            ON CONFLICT (id) DO UPDATE SET provider_id=$2, display_name=$3, description=$4, is_active=$5, is_default=$6, sort_order=$7, capabilities=$8::jsonb, updated_at=now()
+            ON CONFLICT (id) DO UPDATE SET provider_id=$2, external_id=$3, display_name=$4, description=$5, is_active=$6, is_default=$7, sort_order=$8, capabilities=$9::jsonb, updated_at=now()
             """,
-            body.id, body.provider_id, body.display_name, body.description, body.is_active, body.is_default, body.sort_order, _json.dumps(body.capabilities or {}),
+            internal_id, body.provider_id, external_id, body.display_name, body.description, body.is_active, body.is_default, body.sort_order, _json.dumps(body.capabilities or {}),
         )
-    return {"ok": True}
+    return {"ok": True, "id": internal_id, "external_id": external_id}
 
 
 @app.delete("/api/models/{model_id}")
@@ -660,29 +717,26 @@ async def api_sync_models(provider_id: str, _: bool = Depends(require_auth)):
     if not remote_models:
         raise HTTPException(status_code=400, detail=f"Gagal sync models: {last_err or 'no models returned'}")
 
-    # upsert into DB as inactive by default except existing active stay active
+    # upsert into DB as inactive by default except existing active stay active — use composite id provider:external
     synced = 0
     async with _pool.acquire() as con:
         for m in remote_models:
             mid = m.get("id") or m.get("model") or m.get("name")
             if not mid:
                 continue
-            # skip non-image models for rightcodes? keep all but filter heuristics: if openai text models, maybe skip? We'll keep all that contain image/banana/draw/gpt-image/flux/sd etc or keep all if cubence
-            # For rightcodes, we want to include all models that provider returns — they are mostly image models.
-            # Optional filter: allow all
-            existing = await con.fetchrow("SELECT id, is_active, is_default FROM ai_models WHERE id=$1", mid)
-            is_active = existing["is_active"] if existing else False  # new models inactive by default so admin can enable
+            internal_id, external_id = _normalize_model_ids(mid, provider_id, None)
+            existing = await con.fetchrow("SELECT id, is_active, is_default FROM ai_models WHERE id=$1 OR (provider_id=$2 AND external_id=$3)", internal_id, provider_id, external_id)
+            is_active = existing["is_active"] if existing else False
             is_default = existing["is_default"] if existing else False
             display = m.get("display_name") or m.get("id") or mid
             desc = m.get("description") or m.get("owned_by") or ""
-            # keep original id as display if needed
             await con.execute(
                 """
-                INSERT INTO ai_models (id, provider_id, display_name, description, is_active, is_default, sort_order, capabilities, updated_at)
-                VALUES ($1,$2,$3,$4,$5,$6,0,'{}'::jsonb, now())
-                ON CONFLICT (id) DO UPDATE SET provider_id=$2, display_name=COALESCE(EXCLUDED.display_name, ai_models.display_name), description=COALESCE(EXCLUDED.description, ai_models.description), updated_at=now()
+                INSERT INTO ai_models (id, provider_id, external_id, display_name, description, is_active, is_default, sort_order, capabilities, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,0,'{}'::jsonb, now())
+                ON CONFLICT (id) DO UPDATE SET provider_id=$2, external_id=$3, display_name=COALESCE(EXCLUDED.display_name, ai_models.display_name), description=COALESCE(EXCLUDED.description, ai_models.description), updated_at=now()
                 """,
-                mid, provider_id, display, desc, is_active, is_default,
+                internal_id, provider_id, external_id, display, desc, is_active, is_default,
             )
             synced += 1
 

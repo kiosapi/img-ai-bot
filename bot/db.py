@@ -203,19 +203,45 @@ async def _create_schema():
         await con.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_models (
-                id TEXT PRIMARY KEY,                -- e.g. gpt-image-2, flux-pro, etc
+                id TEXT PRIMARY KEY,                -- internal id = provider_id:external_id  (e.g. cubence:gpt-image-2 , rightcodes:gpt-image-2) no collision
                 provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+                external_id TEXT NOT NULL,          -- real model name sent to upstream API (e.g. gpt-image-2)
                 display_name TEXT NOT NULL,         -- shown to user (privacy: no provider)
                 description TEXT,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 is_default BOOLEAN NOT NULL DEFAULT FALSE,
-                capabilities JSONB NOT NULL DEFAULT '{}'::jsonb, -- {txt2img:true, img2img:true, sizes:[...]}
+                capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
                 sort_order INT NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(provider_id, external_id)
             );
             """
         )
+        await con.execute("ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS external_id TEXT;")
+        await con.execute("UPDATE ai_models SET external_id = COALESCE(external_id, id) WHERE external_id IS NULL;")
+        # try to ensure id is provider:external format for new collision-safe handling (backfill old rows if needed)
+        # If id does NOT contain ':', convert to provider_id:external_id
+        # Use DO block to avoid failing on duplicate
+        try:
+            await con.execute(
+                """
+                DO $$
+                DECLARE r RECORD;
+                BEGIN
+                  FOR r IN SELECT id, provider_id, external_id FROM ai_models WHERE id NOT LIKE '%:%' LOOP
+                    BEGIN
+                      UPDATE ai_models SET id = r.provider_id || ':' || r.external_id WHERE ai_models.id = r.id;
+                    EXCEPTION WHEN unique_violation THEN
+                      -- collision already handled, keep old
+                      NULL;
+                    END;
+                  END LOOP;
+                END $$;
+                """
+            )
+        except Exception:
+            pass
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_model_id TEXT;")
         await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS model_id TEXT;")
         # settings for API keys are stored in settings table, but add encrypted helper columns if needed — for now use settings
