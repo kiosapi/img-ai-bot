@@ -11,7 +11,7 @@ from aiogram.types import BotCommand
 import db
 import config
 from middlewares.subscription import SubscriptionMiddleware
-from handlers import start, generate, edit, premium, balance
+from handlers import start, generate, edit, premium, balance, style, myworks
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +20,7 @@ async def _set_commands(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="start", description="🏠 Menu utama / Main menu"),
         BotCommand(command="generate", description="🎨 Buat gambar / Generate image"),
+        BotCommand(command="myworks", description="🖼️ Karya Saya / My Works"),
         BotCommand(command="size", description="📐 Ukuran / Size"),
         BotCommand(command="quota", description="📊 Kuota / Quota"),
         BotCommand(command="balance", description="💰 Saldo / Balance"),
@@ -45,13 +46,12 @@ async def main():
     dp.message.middleware(sub_mw)
     dp.callback_query.middleware(sub_mw)
 
-    # start router first (handles /start, callbacks) — subscription mw lets
-    # the check_sub callback through because is_subscribed re-checks live.
-    # NOTE: edit before balance — edit's FSM photo handler must win over
-    # balance's pending-deposit photo handler when user is mid-edit.
+    # Routers order matters: edit before balance for photo collision fix
     dp.include_router(start.router)
     dp.include_router(generate.router)
     dp.include_router(edit.router)
+    dp.include_router(style.router)
+    dp.include_router(myworks.router)
     dp.include_router(premium.router)
     dp.include_router(balance.router)
 

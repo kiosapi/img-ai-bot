@@ -8,6 +8,7 @@ class GenerateStates(StatesGroup):
 
 class EditStates(StatesGroup):
     waiting_instruction = State()
+    waiting_editthis_instruction = State()  # for edit-this flow: waiting instruction после file_id loaded
 
 
 class BalanceStates(StatesGroup):

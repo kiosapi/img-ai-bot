@@ -29,6 +29,8 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "menu_gen": "🎨 Buat Gambar",
         "menu_edit": "🖌️ Edit Foto",
+        "menu_style": "🎨 Gaya",
+        "menu_myworks": "🖼️ Karya Saya",
         "menu_size": "📐 Ukuran",
         "menu_quota": "📊 Kuota",
         "menu_upgrade": "💎 Upgrade Premium",
@@ -54,7 +56,8 @@ TEXTS: dict[str, dict[str, str]] = {
         "prompt_ask": (
             "🎨 <b>Buat Gambar</b>\n\n"
             "Ketik deskripsi gambar yang kamu mau (balas pesan ini):\n"
-            "<i>contoh: robot lucu main skateboard, gaya 3D render</i>"
+            "<i>contoh: robot lucu main skateboard, gaya 3D render</i>\n\n"
+            "💡 <i>Gunakan <b>Gaya</b> di menu untuk pilih preset style!</i>"
         ),
         "edit_ask": (
             "🖌️ <b>Edit Foto</b>\n\n"
@@ -90,6 +93,11 @@ TEXTS: dict[str, dict[str, str]] = {
         "edit_failed": "❌ <b>Gagal mengedit gambar</b>\n<code>{err}</code>",
         "result_again": "🔄 Buat Lagi",
         "result_menu": "◀️ Menu",
+        "result_regen": "🔄 Ulangi",
+        "result_var": "✨ Variasi",
+        "result_edit_this": "🖌️ Edit",
+        "result_hd": "🔍 HD",
+        "result_style": "🎨 Gaya",
 
         # ---- subscription gate ----
         "join_channel": "📢 Join Channel",
@@ -178,6 +186,19 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_approved": "disetujui",
         "status_rejected": "ditolak",
 
+        # ---- style presets ----
+        "style_title": "🎨 <b>Pilih Gaya Gambar</b>\n\nPilih gaya visual untuk gambar kamu. Gaya akan otomatis ditambahkan ke prompt.\n\nGaya aktif: <b>{current}</b>",
+        "style_set": "✅ Gaya diset ke <b>{style}</b>",
+        "style_none": "Default (tanpa gaya tambahan)",
+
+        # ---- my works ----
+        "myworks_title": "🖼️ <b>Karya Saya</b>\n\nTotal: <b>{total}</b> gambar\nMenampilkan {shown} karya terbaru 👇",
+        "myworks_empty": "🖼️ <b>Karya Saya</b>\n\nKamu belum punya karya. Buat gambar dulu yuk 🎨",
+        "myworks_prev": "◀️ Sebelumnya",
+        "myworks_next": "▶️ Selanjutnya",
+        "myworks_view": "🖼️ <b>Karya #{id}</b>\n\n📝 <i>{prompt}</i>\n📐 {size} · {kind} · {date}",
+        "myworks_regen_hint": "Gunakan tombol di bawah untuk buat ulang, variasi, atau edit.",
+
         # ---- referral ----
         "referral_text": (
             "🎁 <b>Ajak Teman</b>\n\n"
@@ -237,6 +258,8 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "menu_gen": "🎨 Generate Image",
         "menu_edit": "🖌️ Edit Photo",
+        "menu_style": "🎨 Style",
+        "menu_myworks": "🖼️ My Works",
         "menu_size": "📐 Size",
         "menu_quota": "📊 Quota",
         "menu_upgrade": "💎 Upgrade Premium",
@@ -296,6 +319,11 @@ TEXTS: dict[str, dict[str, str]] = {
         "edit_failed": "❌ <b>Failed to edit image</b>\n<code>{err}</code>",
         "result_again": "🔄 Generate Again",
         "result_menu": "◀️ Menu",
+        "result_regen": "🔄 Regen",
+        "result_var": "✨ Variation",
+        "result_edit_this": "🖌️ Edit",
+        "result_hd": "🔍 HD",
+        "result_style": "🎨 Style",
 
         "join_channel": "📢 Join Channel",
         "already_joined": "✅ Already Joined",
@@ -380,6 +408,17 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_pending": "pending",
         "status_approved": "approved",
         "status_rejected": "rejected",
+
+        "style_title": "🎨 <b>Choose Image Style</b>\n\nPick a visual style for your images. It will be auto-appended to your prompt.\n\nActive: <b>{current}</b>",
+        "style_set": "✅ Style set to <b>{style}</b>",
+        "style_none": "Default (no extra style)",
+
+        "myworks_title": "🖼️ <b>My Creations</b>\n\nTotal: <b>{total}</b> images\nShowing {shown} latest 👇",
+        "myworks_empty": "🖼️ <b>My Creations</b>\n\nYou have no creations yet. Go make one 🎨",
+        "myworks_prev": "◀️ Prev",
+        "myworks_next": "▶️ Next",
+        "myworks_view": "🖼️ <b>Creation #{id}</b>\n\n📝 <i>{prompt}</i>\n📐 {size} · {kind} · {date}",
+        "myworks_regen_hint": "Use buttons below to regen, vary, or edit.",
 
         # ---- referral ----
         "referral_text": (

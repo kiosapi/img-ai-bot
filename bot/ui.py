@@ -4,9 +4,9 @@ All user-facing text goes through i18n.t(key, lang, **kwargs) for id/en support.
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import ALLOWED_SIZES, REQUIRED_CHANNEL
 from i18n import t
+import styles as style_presets
 
 BRAND = "Image Generator"
-
 
 def quota_bar(used: int, limit: int, slots: int = 10) -> str:
     """Render a visual progress bar like ▰▰▰▱▱▱▱▱▱▱. limit 0 = unlimited."""
@@ -72,6 +72,8 @@ def main_menu(lang: str = "id"):
     kb = InlineKeyboardBuilder()
     kb.button(text=t("menu_gen", lang), callback_data="menu:gen")
     kb.button(text=t("menu_edit", lang), callback_data="menu:edit")
+    kb.button(text=t("menu_style", lang), callback_data="menu:style")
+    kb.button(text=t("menu_myworks", lang), callback_data="myworks:0")
     kb.button(text=t("menu_size", lang), callback_data="menu:size")
     kb.button(text=t("menu_quota", lang), callback_data="menu:quota")
     kb.button(text=t("menu_balance", lang), callback_data="menu:balance")
@@ -79,7 +81,7 @@ def main_menu(lang: str = "id"):
     kb.button(text=t("menu_referral", lang), callback_data="menu:referral")
     kb.button(text=t("menu_lang", lang), callback_data="menu:lang")
     kb.button(text=t("menu_help", lang), callback_data="menu:help")
-    kb.adjust(2, 2, 2, 1, 1, 1)
+    kb.adjust(2, 2, 2, 2, 3)
     return kb.as_markup()
 
 
@@ -104,11 +106,21 @@ def size_menu(current: str, lang: str = "id"):
     return kb.as_markup()
 
 
-def result_menu(lang: str = "id"):
+def result_menu(lang: str = "id", gen_id: int | None = None, file_id: str | None = None):
+    """Modern result actions: Regen, Variation, Edit, HD, Style, Menu."""
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("result_again", lang), callback_data="menu:gen")
-    kb.button(text=t("result_menu", lang), callback_data="menu:home")
-    kb.adjust(2)
+    if gen_id:
+        kb.button(text=t("result_regen", lang), callback_data=f"regen:{gen_id}")
+        kb.button(text=t("result_var", lang), callback_data=f"var:{gen_id}")
+        kb.button(text=t("result_edit_this", lang), callback_data=f"editthis:{gen_id}")
+        kb.button(text=t("result_hd", lang), callback_data=f"hd:{gen_id}")
+        kb.button(text=t("result_style", lang), callback_data="menu:style")
+        kb.button(text=t("result_menu", lang), callback_data="menu:home")
+        kb.adjust(2, 2, 2)
+    else:
+        kb.button(text=t("result_again", lang), callback_data="menu:gen")
+        kb.button(text=t("result_menu", lang), callback_data="menu:home")
+        kb.adjust(2)
     return kb.as_markup()
 
 
@@ -127,6 +139,58 @@ def lang_menu():
     kb.button(text="🇮🇩 Indonesia", callback_data="lang:id")
     kb.button(text="🇬🇧 English", callback_data="lang:en")
     kb.adjust(2)
+    return kb.as_markup()
+
+
+# ---------------- Style presets ----------------
+def style_menu(current: str | None, lang: str = "id"):
+    kb = InlineKeyboardBuilder()
+    for sid, info in style_presets.STYLES.items():
+        mark = "✓ " if sid == current else ""
+        label = info["label_id"] if lang == "id" else info["label_en"]
+        kb.button(text=f"{mark}{info['emoji']} {label}", callback_data=f"style:{sid}")
+    kb.button(text=t("back_home", lang), callback_data="menu:home")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+# ---------------- My Works / History ----------------
+def myworks_menu(generations: list[dict], total: int, offset: int, limit: int, lang: str = "id"):
+    kb = InlineKeyboardBuilder()
+    for g in generations:
+        # short prompt preview
+        preview = (g.get("prompt") or "")[:30].replace("\n", " ")
+        if len((g.get("prompt") or "")) > 30:
+            preview += "..."
+        kb.button(text=f"🖼️ #{g['id']} {preview}", callback_data=f"view:{g['id']}")
+    # pagination
+    has_prev = offset > 0
+    has_next = offset + limit < total
+    if has_prev:
+        kb.button(text=t("myworks_prev", lang), callback_data=f"myworks:{max(0, offset-limit)}")
+    if has_next:
+        kb.button(text=t("myworks_next", lang), callback_data=f"myworks:{offset+limit}")
+    kb.button(text=t("back_home", lang), callback_data="menu:home")
+    # adjust: items then nav row then back
+    # dynamic
+    if generations:
+        if has_prev or has_next:
+            kb.adjust(*([1]*len(generations) + [2 if (has_prev and has_next) else 1, 1]))
+        else:
+            kb.adjust(*([1]*len(generations) + [1]))
+    else:
+        kb.adjust(1)
+    return kb.as_markup()
+
+
+def myworks_view_menu(gen_id: int, lang: str = "id"):
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t("result_regen", lang), callback_data=f"regen:{gen_id}")
+    kb.button(text=t("result_var", lang), callback_data=f"var:{gen_id}")
+    kb.button(text=t("result_edit_this", lang), callback_data=f"editthis:{gen_id}")
+    kb.button(text=t("back", lang), callback_data="myworks:0")
+    kb.button(text=t("back_home", lang), callback_data="menu:home")
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 

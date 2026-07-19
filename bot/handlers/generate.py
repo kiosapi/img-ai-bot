@@ -7,6 +7,7 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 import db
 import ui
 import cubence
+import styles as style_presets
 from i18n import t
 from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE
 from tgutil import safe_edit, ProgressAnimator
@@ -23,14 +24,21 @@ async def _size_of(user_id: int) -> str:
     return await db.get_pref_size(user_id, DEFAULT_SIZE)
 
 
+async def _style_of(user_id: int) -> str:
+    return await db.get_pref_style(user_id, "none") or "none"
+
+
+async def _apply_user_style(user_id: int, prompt: str) -> tuple[str, str]:
+    """Returns (styled_prompt, style_id)."""
+    sid = await _style_of(user_id)
+    styled = style_presets.apply_style(prompt, sid)
+    return styled, sid
+
+
 async def check_and_consume(user_id: int) -> tuple[bool, int, int]:
-    """Atomic quota check. Returns (allowed, used_after, limit). limit 0 = unlimited.
-    Uses db.try_consume_daily_quota (advisory lock) to prevent race.
-    Falls back to referral bonus quota if daily exhausted.
-    """
+    """Atomic quota check. Returns (allowed, used_after, limit)."""
     from config import DEFAULT_DAILY_LIMIT as _fallback
     allowed, used, limit, _bonus = await db.check_and_consume_atomic(user_id, _fallback)
-    # For callers that only need 3-tuple, discard bonus flag
     return allowed, used, limit
 
 
@@ -53,7 +61,7 @@ async def set_size(callback: CallbackQuery):
 
 
 # ---------------- Core generation ----------------
-async def _do_generate(message: Message, prompt: str):
+async def _do_generate(message: Message, prompt: str, variation: bool = False, force_size: str | None = None):
     lang = await db.get_lang(message.from_user.id)
     if await is_maintenance():
         await message.answer(t("maintenance", lang))
@@ -66,25 +74,51 @@ async def _do_generate(message: Message, prompt: str):
             reply_markup=ui.back_menu(lang))
         return
 
-    size = await _size_of(message.from_user.id)
+    size = force_size or await _size_of(message.from_user.id)
+    # Style apply
+    styled_prompt, style_id = await _apply_user_style(message.from_user.id, prompt)
+    if variation:
+        # add small variation tweak: append a random variant hint
+        import random
+        var_hints = [
+            "different angle", "different lighting", "slightly different composition",
+            "alternative perspective", "with slight variation"
+        ]
+        styled_prompt = f"{styled_prompt}, {random.choice(var_hints)}"
+
     status = await message.answer(t("generating", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
     animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used, limit=limit))
     animator.start()
     try:
-        img = await cubence.generate_image(prompt, size=size)
-        await message.answer_photo(
+        img = await cubence.generate_image(styled_prompt, size=size)
+        sent = await message.answer_photo(
             BufferedInputFile(img, filename="image.png"),
             caption=t("gen_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
-            reply_markup=ui.result_menu(lang),
+            reply_markup=ui.result_menu(lang, gen_id=0, file_id=None),  # placeholder, updated after log
         )
-        await db.log_generation(message.from_user.id, "generate", prompt, size, True)
+        # Save file_id for myworks history (zero VPS storage)
+        try:
+            result_file_id = sent.photo[-1].file_id
+        except Exception:
+            result_file_id = None
+        gen_id = await db.log_generation(
+            message.from_user.id, "generate", prompt, size, True,
+            result_file_id=result_file_id, style_id=style_id if style_id != "none" else None
+        )
+        if result_file_id and gen_id:
+            # update result menu with real gen_id
+            try:
+                await sent.edit_caption(
+                    caption=t("gen_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
+                    reply_markup=ui.result_menu(lang, gen_id=gen_id, file_id=result_file_id)
+                )
+            except Exception:
+                pass
     except cubence.CubenceError as e:
-        await db.log_generation(message.from_user.id, "generate", prompt, size, False)
+        await db.log_generation(message.from_user.id, "generate", prompt, size, False, style_id=style_id if style_id != "none" else None)
         await message.answer(t("gen_failed", lang, err=e), reply_markup=ui.back_menu(lang))
     except Exception as e:
-        # Catch-all so unexpected errors never leave the user without any
-        # response at all (previously this could crash the update silently).
-        await db.log_generation(message.from_user.id, "generate", prompt, size, False)
+        await db.log_generation(message.from_user.id, "generate", prompt, size, False, style_id=style_id if style_id != "none" else None)
         await message.answer(t("gen_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
     finally:
         await animator.stop()
@@ -96,10 +130,9 @@ async def _do_generate(message: Message, prompt: str):
 
 @router.message(Command("generate"))
 async def cmd_generate(message: Message):
-    lang = await db.get_lang(message.from_user.id)
     prompt = message.text.partition(" ")[2].strip()
     if not prompt:
-        await message.answer(ui.prompt_ask(lang))
+        await message.answer(ui.prompt_ask(await db.get_lang(message.from_user.id)))
         return
     await _do_generate(message, prompt)
 
@@ -112,10 +145,7 @@ async def fsm_prompt(message: Message, state: FSMContext):
 
 
 # Fallback: plain free-typed text (not a command, no active FSM state) is
-# treated directly as a generate prompt. StateFilter(None) is critical — without
-# it this catch-all would match even while the user is inside another flow's
-# state (edit / custom top-up) and swallow the message before those handlers
-# (registered in later routers) can run.
+# treated directly as a generate prompt.
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def free_text_prompt(message: Message):
     await _do_generate(message, message.text.strip())

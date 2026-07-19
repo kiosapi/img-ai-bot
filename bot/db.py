@@ -152,6 +152,9 @@ async def _create_schema():
         await con.execute("ALTER TABLE broadcast_history ADD COLUMN IF NOT EXISTS image_file_id TEXT;")
         await con.execute("ALTER TABLE broadcast_history ADD COLUMN IF NOT EXISTS button_text TEXT;")
         await con.execute("ALTER TABLE broadcast_history ADD COLUMN IF NOT EXISTS button_url TEXT;")
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS result_file_id TEXT;")
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS style_id TEXT;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_style TEXT;")
 
 
 # ---------- users ----------
@@ -376,12 +379,14 @@ async def check_and_consume_atomic(user_id: int, free_fallback: int) -> tuple[bo
         return True, n, limit, False
 
 
-async def log_generation(user_id, kind, prompt, size, success):
+async def log_generation(user_id, kind, prompt, size, success, result_file_id: str | None = None, style_id: str | None = None):
     async with _pool.acquire() as con:
-        await con.execute(
-            "INSERT INTO generations (user_id, kind, prompt, size, success) VALUES ($1,$2,$3,$4,$5)",
-            user_id, kind, prompt, size, success,
+        row = await con.fetchrow(
+            "INSERT INTO generations (user_id, kind, prompt, size, success, result_file_id, style_id) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+            user_id, kind, prompt, size, success, result_file_id, style_id,
         )
+        return row["id"] if row else None
 
 
 # ---------- settings ----------
@@ -664,3 +669,51 @@ async def seed_default_plan():
                 "INSERT INTO plans (name, daily_limit, price, duration_days, description, sort_order) "
                 "VALUES ($1,$2,$3,$4,$5,$6)",
                 "Premium", 100, 20000, 30, "Kuota 100 gambar/hari selama 30 hari", 1)
+
+
+# ---------- generation results / feat 2,3,4 ----------
+async def save_generation_result(gen_id: int, result_file_id: str):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE generations SET result_file_id=$2 WHERE id=$1", gen_id, result_file_id)
+
+
+async def log_generation_with_result(user_id, kind, prompt, size, success, result_file_id: str | None = None, style_id: str | None = None):
+    """Helper alias that inserts with file_id in one go."""
+    return await log_generation(user_id, kind, prompt, size, success, result_file_id, style_id)
+
+
+async def get_user_generations(user_id: int, limit: int = 20, offset: int = 0) -> list[dict]:
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT * FROM generations WHERE user_id=$1 AND success=TRUE AND result_file_id IS NOT NULL "
+            "ORDER BY id DESC LIMIT $2 OFFSET $3",
+            user_id, limit, offset,
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_generation_by_id(gen_id: int) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM generations WHERE id=$1", gen_id)
+        return dict(row) if row else None
+
+
+async def count_user_generations(user_id: int) -> int:
+    async with _pool.acquire() as con:
+        cnt = await con.fetchval(
+            "SELECT count(*) FROM generations WHERE user_id=$1 AND success=TRUE AND result_file_id IS NOT NULL",
+            user_id,
+        )
+        return int(cnt or 0)
+
+
+async def get_pref_style(user_id: int, default: str | None = None) -> str | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT pref_style FROM users WHERE user_id=$1", user_id)
+        return row["pref_style"] if row and row["pref_style"] else default
+
+
+async def set_pref_style(user_id: int, style_id: str | None):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE users SET pref_style=$2 WHERE user_id=$1", user_id, style_id)
+

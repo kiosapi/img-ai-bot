@@ -21,11 +21,8 @@ async def _lang(user_id: int) -> str:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()  # exit any active FSM state
+    await state.clear()
     u = message.from_user
-    # NOTE: user upsert + referral deep-link capture happens in
-    # SubscriptionMiddleware (runs before this handler, even for users who
-    # haven't joined the channel yet) — see middlewares/subscription.py.
     lang = await _lang(u.id)
     await message.answer(ui.welcome(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
 
@@ -66,6 +63,18 @@ async def cmd_balance(message: Message):
     lang = await _lang(message.from_user.id)
     balance = await db.get_balance(message.from_user.id)
     await message.answer(ui.balance_text(balance, lang), reply_markup=ui.balance_menu(lang))
+
+
+@router.message(Command("myworks"))
+async def cmd_myworks_redirect(message: Message):
+    # redirect to myworks handler's logic via callback? Simpler call db directly
+    lang = await _lang(message.from_user.id)
+    total = await db.count_user_generations(message.from_user.id)
+    if total == 0:
+        await message.answer(t("myworks_empty", lang), reply_markup=ui.back_menu(lang))
+        return
+    gens = await db.get_user_generations(message.from_user.id, limit=5, offset=0)
+    await message.answer(t("myworks_title", lang, total=total, shown=len(gens)), reply_markup=ui.myworks_menu(gens, total, 0, 5, lang))
 
 
 @router.message(Command("lang"))
@@ -113,10 +122,6 @@ async def nav_size(callback: CallbackQuery):
 async def nav_gen(callback: CallbackQuery, state: FSMContext):
     lang = await _lang(callback.from_user.id)
     await state.set_state(GenerateStates.waiting_prompt)
-    # ForceReply shows the "Balas pesan ini..." reply bar while the user is
-    # actively in this flow. The bar auto-dismisses once the user sends their
-    # prompt (state is cleared by fsm_prompt) — see note in cmd_start about
-    # the app-reopen issue.
     await callback.message.answer(ui.prompt_ask(lang), reply_markup=ForceReply(input_field_placeholder="..."))
     await callback.answer()
 
