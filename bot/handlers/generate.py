@@ -171,6 +171,22 @@ async def cmd_generate(message: Message):
     await _do_generate(message, prompt, enhance=enhance)
 
 
+@router.message(Command("enhance"))
+async def cmd_enhance(message: Message):
+    lang = await db.get_lang(message.from_user.id)
+    if not await ff.enhance_enabled():
+        await message.answer(t("feature_disabled", lang), reply_markup=ui.back_menu(lang))
+        return
+    prompt = message.text.partition(" ")[2].strip()
+    if not prompt:
+        # ask input with enhance flag
+        from aiogram.fsm.context import FSMContext
+        # cannot inject state here via signature, fallback ask
+        await message.answer(t("enhance_doing", lang) + "\n\n" + ui.prompt_ask(lang))
+        return
+    await _do_generate(message, prompt, enhance=True)
+
+
 @router.callback_query(F.data.startswith("enhance:"))
 async def cb_enhance(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)

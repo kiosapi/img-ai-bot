@@ -20,6 +20,9 @@ async def _set_commands(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="start", description="🏠 Menu utama / Main menu"),
         BotCommand(command="generate", description="🎨 Buat gambar / Generate image"),
+        BotCommand(command="enhance", description="✨ Enhance prompt + generate"),
+        BotCommand(command="batch", description="🎲 Batch x4 generate (cth: /batch 4 kucing)"),
+        BotCommand(command="sticker", description="🎖️ Sticker pack dari karya"),
         BotCommand(command="myworks", description="🖼️ Karya Saya / My Works"),
         BotCommand(command="checkin", description="📅 Check-in harian / Daily check-in"),
         BotCommand(command="size", description="📐 Ukuran / Size"),
