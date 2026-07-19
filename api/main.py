@@ -153,12 +153,40 @@ async def ban_user(body: BanBody, _: bool = Depends(require_auth)):
 # ---------------- Broadcast ----------------
 class BroadcastBody(BaseModel):
     message: str
+    audience: str = "all"  # all | premium | free
+
+
+def _audience_where(audience: str) -> str:
+    if audience == "premium":
+        return "WHERE NOT is_banned AND premium_until > now()"
+    if audience == "free":
+        return "WHERE NOT is_banned AND (premium_until IS NULL OR premium_until <= now())"
+    return "WHERE NOT is_banned"
+
+
+@app.get("/api/broadcast/audience-counts")
+async def broadcast_audience_counts(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        all_c = await con.fetchval("SELECT count(*) FROM users " + _audience_where("all")) or 0
+        premium_c = await con.fetchval("SELECT count(*) FROM users " + _audience_where("premium")) or 0
+        free_c = await con.fetchval("SELECT count(*) FROM users " + _audience_where("free")) or 0
+    return {"all": all_c, "premium": premium_c, "free": free_c}
+
+
+@app.get("/api/broadcast/history")
+async def broadcast_history(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT id, message, audience, sent, total, created_at FROM broadcast_history "
+            "ORDER BY id DESC LIMIT 20")
+    return {"history": [dict(r) for r in rows]}
 
 
 @app.post("/api/broadcast")
 async def broadcast(body: BroadcastBody, _: bool = Depends(require_auth)):
+    audience = body.audience if body.audience in ("all", "premium", "free") else "all"
     async with _pool.acquire() as con:
-        rows = await con.fetch("SELECT user_id FROM users WHERE NOT is_banned")
+        rows = await con.fetch("SELECT user_id FROM users " + _audience_where(audience))
     sent = 0
     async with httpx.AsyncClient(timeout=30) as client:
         for r in rows:
@@ -170,6 +198,10 @@ async def broadcast(body: BroadcastBody, _: bool = Depends(require_auth)):
                     sent += 1
             except Exception:
                 pass
+    async with _pool.acquire() as con:
+        await con.execute(
+            "INSERT INTO broadcast_history (message, audience, sent, total) VALUES ($1,$2,$3,$4)",
+            body.message, audience, sent, len(rows))
     return {"ok": True, "sent": sent, "total": len(rows)}
 
 

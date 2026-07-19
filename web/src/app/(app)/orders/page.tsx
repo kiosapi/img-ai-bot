@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
-import { Crown, Clock, DollarSign, CheckCircle2, XCircle, Image as ImageIcon, ExternalLink } from "lucide-react";
+import { Crown, Clock, DollarSign, CheckCircle2, XCircle, Image as ImageIcon, ExternalLink, CreditCard, BarChart3, Hourglass, StickyNote } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge, Textarea } from "@/components/ui/controls";
 import { Modal } from "@/components/ui/modal";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 const TABS = [
   { v: "pending", label: "Menunggu" },
@@ -21,6 +22,7 @@ export default function OrdersPage() {
   const [stats, setStats] = useState<any>(null);
   const [proof, setProof] = useState<number | null>(null);
   const [rejectId, setRejectId] = useState<number | null>(null);
+  const [approveId, setApproveId] = useState<number | null>(null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -31,9 +33,8 @@ export default function OrdersPage() {
   useEffect(() => { load(); }, [load]);
 
   async function approve(id: number) {
-    if (!confirm("Setujui pembayaran ini? Premium user akan langsung aktif.")) return;
     setBusy(true);
-    try { await api(`/api/orders/${id}/approve`, { method: "POST" }); toast.success("Disetujui! Premium aktif & user diberi tahu."); load(); }
+    try { await api(`/api/orders/${id}/approve`, { method: "POST" }); toast.success("Disetujui! Premium aktif & user diberi tahu."); setApproveId(null); load(); }
     catch (e: any) { toast.error(e.message || "Gagal"); } finally { setBusy(false); }
   }
 
@@ -85,10 +86,16 @@ export default function OrdersPage() {
                     {badge(o.status)}
                   </div>
                   <div className="mt-2 flex flex-col gap-0.5 text-sm text-muted-foreground">
-                    <span>💎 {o.plan_name} · <span className="font-semibold text-foreground">{rupiah(o.amount)}</span></span>
-                    <span>💳 {o.method_name} · 📊 {o.daily_limit === 0 ? "Unlimited" : o.daily_limit + "/hari"} · ⏳ {o.duration_days}h</span>
+                    <span className="flex items-center gap-1"><Crown className="h-3.5 w-3.5" /> {o.plan_name} · <span className="font-semibold text-foreground">{rupiah(o.amount)}</span></span>
+                    <span className="flex items-center gap-1 flex-wrap">
+                      <CreditCard className="h-3.5 w-3.5" /> {o.method_name}
+                      <span className="mx-0.5">·</span>
+                      <BarChart3 className="h-3.5 w-3.5" /> {o.daily_limit === 0 ? "Unlimited" : o.daily_limit + "/hari"}
+                      <span className="mx-0.5">·</span>
+                      <Hourglass className="h-3.5 w-3.5" /> {o.duration_days}h
+                    </span>
                     <span className="text-xs">{new Date(o.created_at).toLocaleString("id-ID")}</span>
-                    {o.note && <span className="text-xs italic">📝 {o.note}</span>}
+                    {o.note && <span className="flex items-center gap-1 text-xs italic"><StickyNote className="h-3 w-3" /> {o.note}</span>}
                   </div>
                 </div>
                 {o.proof_file_id
@@ -97,7 +104,7 @@ export default function OrdersPage() {
               </div>
               {o.status === "pending" && (
                 <div className="mt-4 flex gap-2">
-                  <Button size="sm" variant="success" className="flex-1" onClick={() => approve(o.id)} disabled={busy}><CheckCircle2 className="h-4 w-4" />Setujui</Button>
+                  <Button size="sm" variant="success" className="flex-1" onClick={() => setApproveId(o.id)} disabled={busy}><CheckCircle2 className="h-4 w-4" />Setujui</Button>
                   <Button size="sm" variant="destructive" className="flex-1" onClick={() => { setRejectId(o.id); setNote(""); }} disabled={busy}><XCircle className="h-4 w-4" />Tolak</Button>
                 </div>
               )}
@@ -129,6 +136,18 @@ export default function OrdersPage() {
           <Button variant="destructive" className="flex-1" onClick={doReject} disabled={busy}>{busy ? "..." : "Tolak"}</Button>
         </div>
       </Modal>
+
+      {/* Approve confirm */}
+      <ConfirmDialog
+        open={approveId != null}
+        onClose={() => setApproveId(null)}
+        onConfirm={() => approveId != null && approve(approveId)}
+        loading={busy}
+        title="Setujui Pembayaran"
+        variant="success"
+        confirmLabel="Ya, Setujui"
+        description="Setujui pembayaran ini? Premium user akan langsung aktif dan mereka akan diberi tahu lewat bot."
+      />
     </div>
   );
 }

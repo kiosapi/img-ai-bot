@@ -93,6 +93,15 @@ async def _create_schema():
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
                 decided_at    TIMESTAMPTZ
             );
+
+            CREATE TABLE IF NOT EXISTS broadcast_history (
+                id         BIGSERIAL PRIMARY KEY,
+                message    TEXT   NOT NULL,
+                audience   TEXT   NOT NULL DEFAULT 'all',   -- all|premium|free
+                sent       INT    NOT NULL DEFAULT 0,
+                total      INT    NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
             """
         )
         # migrations for existing DBs

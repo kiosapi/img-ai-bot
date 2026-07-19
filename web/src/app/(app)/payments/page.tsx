@@ -1,19 +1,20 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Plus, Pencil, Trash2, Landmark, Smartphone, QrCode, CreditCard } from "lucide-react";
+import { Plus, Pencil, Trash2, Landmark, Smartphone, QrCode, CreditCard, Hash, User, Info, ImageIcon } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea, Badge, Switch } from "@/components/ui/controls";
 import { Modal, Field, Select } from "@/components/ui/modal";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 const empty = { id: 0, type: "bank", name: "", account_name: "", account_number: "", instructions: "", qr_image: "", is_active: true, sort_order: 0 };
 const TYPES = [
-  { v: "bank", label: "🏦 Bank Transfer" },
-  { v: "ewallet", label: "📱 E-Wallet" },
-  { v: "qris", label: "🔳 QRIS" },
-  { v: "other", label: "💳 Lainnya" },
+  { v: "bank", label: "Bank Transfer", icon: Landmark },
+  { v: "ewallet", label: "E-Wallet", icon: Smartphone },
+  { v: "qris", label: "QRIS", icon: QrCode },
+  { v: "other", label: "Lainnya", icon: CreditCard },
 ];
 const icon = (t: string) => t === "bank" ? Landmark : t === "ewallet" ? Smartphone : t === "qris" ? QrCode : CreditCard;
 
@@ -22,6 +23,7 @@ export default function MethodsPage() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<any>(empty);
   const [saving, setSaving] = useState(false);
+  const [delTarget, setDelTarget] = useState<any>(null);
 
   const load = () => api("/api/methods").then((d) => setMethods(d.methods)).catch(() => {});
   useEffect(() => { load(); }, []);
@@ -44,9 +46,9 @@ export default function MethodsPage() {
     } catch { toast.error("Gagal menyimpan"); } finally { setSaving(false); }
   }
 
-  async function del(m: any) {
-    if (!confirm(`Hapus metode "${m.name}"?`)) return;
-    try { await api(`/api/methods/${m.id}`, { method: "DELETE" }); toast.success("Metode dihapus"); load(); }
+  async function del() {
+    if (!delTarget) return;
+    try { await api(`/api/methods/${delTarget.id}`, { method: "DELETE" }); toast.success("Metode dihapus"); setDelTarget(null); load(); }
     catch { toast.error("Gagal menghapus"); }
   }
 
@@ -75,14 +77,14 @@ export default function MethodsPage() {
                   {m.is_active ? <Badge variant="success">aktif</Badge> : <Badge variant="muted">nonaktif</Badge>}
                 </div>
                 <div className="mt-3 flex flex-col gap-1 text-sm text-muted-foreground">
-                  {m.account_number && <span>📌 <span className="font-mono text-foreground">{m.account_number}</span></span>}
-                  {m.account_name && <span>👤 {m.account_name}</span>}
-                  {m.instructions && <span className="text-xs">ℹ️ {m.instructions}</span>}
-                  {m.qr_image && <span className="text-xs">🖼️ QR image tersimpan</span>}
+                  {m.account_number && <span className="flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" /> <span className="font-mono text-foreground">{m.account_number}</span></span>}
+                  {m.account_name && <span className="flex items-center gap-1.5"><User className="h-3.5 w-3.5" /> {m.account_name}</span>}
+                  {m.instructions && <span className="flex items-center gap-1.5 text-xs"><Info className="h-3 w-3" /> {m.instructions}</span>}
+                  {m.qr_image && <span className="flex items-center gap-1.5 text-xs"><ImageIcon className="h-3 w-3" /> QR image tersimpan</span>}
                 </div>
                 <div className="mt-4 flex gap-2">
                   <Button size="sm" variant="outline" className="flex-1" onClick={() => openEdit(m)}><Pencil className="h-4 w-4" />Edit</Button>
-                  <Button size="sm" variant="destructive" onClick={() => del(m)}><Trash2 className="h-4 w-4" /></Button>
+                  <Button size="sm" variant="destructive" onClick={() => setDelTarget(m)}><Trash2 className="h-4 w-4" /></Button>
                 </div>
               </CardContent>
             </Card>
@@ -104,6 +106,16 @@ export default function MethodsPage() {
         </div>
         <Button className="w-full" onClick={save} disabled={saving}>{saving ? "Menyimpan..." : "Simpan"}</Button>
       </Modal>
+
+      <ConfirmDialog
+        open={delTarget != null}
+        onClose={() => setDelTarget(null)}
+        onConfirm={del}
+        variant="destructive"
+        title="Hapus Metode Pembayaran"
+        confirmLabel="Ya, Hapus"
+        description={<>Yakin mau hapus metode <b className="text-foreground">&quot;{delTarget?.name}&quot;</b>? Aksi ini tidak bisa dibatalkan.</>}
+      />
     </div>
   );
 }

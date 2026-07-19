@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Plus, Pencil, Trash2, Crown } from "lucide-react";
+import { Plus, Pencil, Trash2, Crown, BarChart3, Hourglass, StickyNote, Infinity as InfinityIcon } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea, Badge, Switch } from "@/components/ui/controls";
 import { Modal, Field } from "@/components/ui/modal";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 const empty = { id: 0, name: "", daily_limit: 100, price: 0, duration_days: 30, description: "", is_active: true, sort_order: 0 };
 
@@ -15,6 +16,7 @@ export default function PlansPage() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<any>(empty);
   const [saving, setSaving] = useState(false);
+  const [delTarget, setDelTarget] = useState<any>(null);
 
   const load = () => api("/api/plans").then((d) => setPlans(d.plans)).catch(() => {});
   useEffect(() => { load(); }, []);
@@ -34,9 +36,9 @@ export default function PlansPage() {
     } catch { toast.error("Gagal menyimpan"); } finally { setSaving(false); }
   }
 
-  async function del(p: any) {
-    if (!confirm(`Hapus paket "${p.name}"?`)) return;
-    try { await api(`/api/plans/${p.id}`, { method: "DELETE" }); toast.success("Paket dihapus"); load(); }
+  async function del() {
+    if (!delTarget) return;
+    try { await api(`/api/plans/${delTarget.id}`, { method: "DELETE" }); toast.success("Paket dihapus"); setDelTarget(null); load(); }
     catch { toast.error("Gagal menghapus"); }
   }
 
@@ -65,13 +67,16 @@ export default function PlansPage() {
               </div>
               <div className="mt-3 text-2xl font-extrabold">{rupiah(p.price)}</div>
               <div className="mt-2 flex flex-col gap-1 text-sm text-muted-foreground">
-                <span>📊 Kuota: {p.daily_limit === 0 ? "♾️ Unlimited" : `${p.daily_limit}/hari`}</span>
-                <span>⏳ Masa aktif: {p.duration_days} hari</span>
-                {p.description && <span className="text-xs">📝 {p.description}</span>}
+                <span className="flex items-center gap-1.5">
+                  {p.daily_limit === 0 ? <InfinityIcon className="h-3.5 w-3.5" /> : <BarChart3 className="h-3.5 w-3.5" />}
+                  Kuota: {p.daily_limit === 0 ? "Unlimited" : `${p.daily_limit}/hari`}
+                </span>
+                <span className="flex items-center gap-1.5"><Hourglass className="h-3.5 w-3.5" /> Masa aktif: {p.duration_days} hari</span>
+                {p.description && <span className="flex items-center gap-1.5 text-xs"><StickyNote className="h-3 w-3" /> {p.description}</span>}
               </div>
               <div className="mt-4 flex gap-2">
                 <Button size="sm" variant="outline" className="flex-1" onClick={() => openEdit(p)}><Pencil className="h-4 w-4" />Edit</Button>
-                <Button size="sm" variant="destructive" onClick={() => del(p)}><Trash2 className="h-4 w-4" /></Button>
+                <Button size="sm" variant="destructive" onClick={() => setDelTarget(p)}><Trash2 className="h-4 w-4" /></Button>
               </div>
             </CardContent>
           </Card>
@@ -93,6 +98,16 @@ export default function PlansPage() {
         </div>
         <Button className="w-full" onClick={save} disabled={saving}>{saving ? "Menyimpan..." : "Simpan"}</Button>
       </Modal>
+
+      <ConfirmDialog
+        open={delTarget != null}
+        onClose={() => setDelTarget(null)}
+        onConfirm={del}
+        variant="destructive"
+        title="Hapus Paket Premium"
+        confirmLabel="Ya, Hapus"
+        description={<>Yakin mau hapus paket <b className="text-foreground">&quot;{delTarget?.name}&quot;</b>? Aksi ini tidak bisa dibatalkan.</>}
+      />
     </div>
   );
 }
