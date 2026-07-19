@@ -102,3 +102,13 @@ async def _is_prompt_reply(message: Message) -> bool:
 @router.message(F.reply_to_message, F.text, ~F.text.startswith("/"), _is_prompt_reply)
 async def reply_prompt(message: Message):
     await _do_generate(message, message.text.strip())
+
+
+# Fallback: plain free-typed text (not a command, not a reply to any bot message)
+# is treated directly as a generate prompt. This covers users who just type an
+# idea without pressing "Buat Gambar" / using /generate first — previously such
+# messages were silently dropped by the dispatcher (no handler matched → no
+# response at all, looked like the bot was "broken").
+@router.message(F.text, ~F.text.startswith("/"), F.reply_to_message.is_(None))
+async def free_text_prompt(message: Message):
+    await _do_generate(message, message.text.strip())
