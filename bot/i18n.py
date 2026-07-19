@@ -33,6 +33,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "menu_quota": "📊 Kuota",
         "menu_upgrade": "💎 Upgrade Premium",
         "menu_balance": "💰 Saldo Saya",
+        "menu_referral": "🎁 Ajak Teman",
         "menu_help": "❓ Bantuan",
         "menu_lang": "🌐 Bahasa",
 
@@ -73,6 +74,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "quota_status_free": "🆓 <b>Status:</b> Free\n",
         "quota_used": "Terpakai <b>{used}</b> dari <b>{total}</b>",
         "quota_left": "Sisa: <b>{left}</b>\n",
+        "quota_bonus": "🎁 Bonus referral: <b>{n} gambar</b> extra tersedia\n",
         "quota_reset": "🔄 Kuota reset otomatis tiap hari.",
         "quota_upsell": "\n💎 Mau kuota lebih banyak? Tekan <b>Upgrade Premium</b>!",
         "quota_unlimited": "♾️ tanpa batas",
@@ -173,6 +175,22 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_approved": "disetujui",
         "status_rejected": "ditolak",
 
+        # ---- referral ----
+        "referral_text": (
+            "🎁 <b>Ajak Teman</b>\n\n"
+            "Bagikan link referral kamu ke teman. Setiap teman yang join lewat link ini "
+            "dan bergabung ke channel, kamu dapat bonus:\n"
+            "🎉 {reward_desc}\n\n"
+            "🔗 <b>Link referral kamu:</b>\n<code>{link}</code>\n\n"
+            "📊 <b>Statistik</b>\n"
+            "• Total diundang: <b>{total}</b>\n"
+            "• Berhasil (dapat bonus): <b>{rewarded}</b>\n"
+            "• Menunggu join channel: <b>{pending}</b>\n"
+            "• Sisa bonus kuota gambar: <b>{bonus_quota}</b>"
+        ),
+        "referral_reward_balance": "Saldo {amount}",
+        "referral_reward_quota": "{n} kuota gambar tambahan",
+
         # ---- language ----
         "lang_pick": "🌐 <b>Pilih Bahasa / Choose Language</b>",
         "lang_id": "🇮🇩 Indonesia",
@@ -220,6 +238,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "menu_quota": "📊 Quota",
         "menu_upgrade": "💎 Upgrade Premium",
         "menu_balance": "💰 My Balance",
+        "menu_referral": "🎁 Invite Friends",
         "menu_help": "❓ Help",
         "menu_lang": "🌐 Language",
 
@@ -259,6 +278,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "quota_status_free": "🆓 <b>Status:</b> Free\n",
         "quota_used": "Used <b>{used}</b> of <b>{total}</b>",
         "quota_left": "Left: <b>{left}</b>\n",
+        "quota_bonus": "🎁 Referral bonus: <b>{n} images</b> extra available\n",
         "quota_reset": "🔄 Quota resets automatically every day.",
         "quota_upsell": "\n💎 Want more quota? Tap <b>Upgrade Premium</b>!",
         "quota_unlimited": "♾️ unlimited",
@@ -354,6 +374,22 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_pending": "pending",
         "status_approved": "approved",
         "status_rejected": "rejected",
+
+        # ---- referral ----
+        "referral_text": (
+            "🎁 <b>Invite Friends</b>\n\n"
+            "Share your referral link with friends. Every friend who joins via this link "
+            "and subscribes to the channel earns you a bonus:\n"
+            "🎉 {reward_desc}\n\n"
+            "🔗 <b>Your referral link:</b>\n<code>{link}</code>\n\n"
+            "📊 <b>Stats</b>\n"
+            "• Total invited: <b>{total}</b>\n"
+            "• Rewarded: <b>{rewarded}</b>\n"
+            "• Waiting for channel join: <b>{pending}</b>\n"
+            "• Remaining bonus images: <b>{bonus_quota}</b>"
+        ),
+        "referral_reward_balance": "Balance {amount}",
+        "referral_reward_quota": "{n} extra image quota",
 
         "lang_pick": "🌐 <b>Choose Language / Pilih Bahasa</b>",
         "lang_id": "🇮🇩 Indonesia",

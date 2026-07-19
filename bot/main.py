@@ -23,6 +23,7 @@ async def _set_commands(bot: Bot):
         BotCommand(command="quota", description="📊 Kuota / Quota"),
         BotCommand(command="balance", description="💰 Saldo / Balance"),
         BotCommand(command="upgrade", description="💎 Premium"),
+        BotCommand(command="referral", description="🎁 Ajak Teman / Invite Friends"),
         BotCommand(command="lang", description="🌐 Bahasa / Language"),
         BotCommand(command="help", description="❓ Bantuan / Help"),
     ])

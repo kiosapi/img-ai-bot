@@ -13,6 +13,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 DEFAULT_DAILY_LIMIT = int(os.environ.get("DEFAULT_DAILY_LIMIT", "20"))
 REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "")
 SESSION_SECRET = os.environ.get("DASH_SECRET", secrets.token_hex(16))
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
 app = FastAPI(title="ImageBot Admin API")
 _pool: asyncpg.Pool | None = None
@@ -154,6 +155,9 @@ async def ban_user(body: BanBody, _: bool = Depends(require_auth)):
 class BroadcastBody(BaseModel):
     message: str
     audience: str = "all"  # all | premium | free
+    image_file_id: str | None = None  # optional Telegram file_id (if provided, sent as photo with caption)
+    button_text: str | None = None    # optional inline button label
+    button_url: str | None = None     # optional inline button URL (must be http(s)://)
 
 
 def _audience_where(audience: str) -> str:
@@ -162,6 +166,39 @@ def _audience_where(audience: str) -> str:
     if audience == "free":
         return "WHERE NOT is_banned AND (premium_until IS NULL OR premium_until <= now())"
     return "WHERE NOT is_banned"
+
+
+def _build_inline_keyboard(button_text: str | None, button_url: str | None) -> str | None:
+    """Build the JSON-encoded reply_markup that Telegram's API expects. Returns
+    None if the button is incomplete/invalid; the caller should treat that as
+    'no button' rather than sending a malformed payload to Telegram.
+    """
+    if not button_text or not button_url:
+        return None
+    text = button_text.strip()[:64]
+    url = button_url.strip()
+    if not (url.startswith("http://") or url.startswith("https://") or url.startswith("t.me/")):
+        return None
+    if not text:
+        return None
+    import json
+    return json.dumps({"inline_keyboard": [[{"text": text, "url": url}]]})
+
+
+def _sanitize_html(s: str) -> str:
+    """Telegram's HTML parser is strict. We only allow <b>, <i>, <u>, <s>, <a>, <code>, <pre>.
+    Any other tag gets stripped, plus we always escape & < > first to avoid injection.
+    """
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Re-open the small whitelist tags from their escaped form so users can still use them.
+    return (
+        s.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>")
+         .replace("&lt;i&gt;", "<i>").replace("&lt;/i&gt;", "</i>")
+         .replace("&lt;u&gt;", "<u>").replace("&lt;/u&gt;", "</u>")
+         .replace("&lt;s&gt;", "<s>").replace("&lt;/s&gt;", "</s>")
+         .replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
+         .replace("&lt;pre&gt;", "<pre>").replace("&lt;/pre&gt;", "</pre>")
+    )
 
 
 @app.get("/api/broadcast/audience-counts")
@@ -177,31 +214,95 @@ async def broadcast_audience_counts(_: bool = Depends(require_auth)):
 async def broadcast_history(_: bool = Depends(require_auth)):
     async with _pool.acquire() as con:
         rows = await con.fetch(
-            "SELECT id, message, audience, sent, total, created_at FROM broadcast_history "
-            "ORDER BY id DESC LIMIT 20")
+            "SELECT id, message, audience, sent, total, image_file_id, button_text, button_url, created_at "
+            "FROM broadcast_history ORDER BY id DESC LIMIT 20")
     return {"history": [dict(r) for r in rows]}
+
+
+# Accepts an uploaded image and uploads it to the bot's "service" chat so we
+# can store a reusable Telegram file_id (no VPS storage of any pixel data,
+# consistent with the rest of this project). The file_id can then be used in
+# future broadcasts. Requires admin auth.
+@app.post("/api/broadcast/upload-image")
+async def broadcast_upload_image(request: Request, _: bool = Depends(require_auth)):
+    """Upload an image to the bot (stored as Telegram file_id, NOT on VPS).
+    Form fields: file (binary image), chat_id (optional target chat for the upload;
+    defaults to the first admin's user_id so the image is owned by the bot itself).
+    Returns: {ok, file_id, width, height}
+    """
+    form = await request.form()
+    upload = form.get("file")
+    if not upload or not getattr(upload, "file", None):
+        raise HTTPException(status_code=400, detail="File gambar wajib diisi")
+    target_chat = form.get("chat_id")
+    if target_chat:
+        try:
+            target_chat = int(target_chat)
+        except (TypeError, ValueError):
+            target_chat = None
+    if not target_chat:
+        if not ADMIN_IDS:
+            raise HTTPException(status_code=400,
+                detail="ADMIN_IDS belum diset di server, tidak bisa upload gambar broadcast")
+        target_chat = ADMIN_IDS[0]
+    contents = await upload.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="File kosong")
+    if len(contents) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Ukuran gambar maks 10MB")
+    async with httpx.AsyncClient(timeout=60) as client:
+        files = {"photo": (upload.filename or "broadcast.jpg", contents, upload.content_type or "image/jpeg")}
+        resp = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data={"chat_id": str(target_chat)},
+            files=files)
+    data = resp.json()
+    if not data.get("ok"):
+        raise HTTPException(status_code=400,
+            detail=f"Telegram menolak upload: {data.get('description', 'unknown error')}")
+    photo = data["result"]["photo"][-1]  # highest resolution variant
+    return {"ok": True, "file_id": photo["file_id"],
+            "width": photo.get("width"), "height": photo.get("height")}
 
 
 @app.post("/api/broadcast")
 async def broadcast(body: BroadcastBody, _: bool = Depends(require_auth)):
     audience = body.audience if body.audience in ("all", "premium", "free") else "all"
+    text = _sanitize_html(body.message)[:4096]
+    reply_markup = _build_inline_keyboard(body.button_text, body.button_url)
+    has_image = bool(body.image_file_id)
     async with _pool.acquire() as con:
         rows = await con.fetch("SELECT user_id FROM users " + _audience_where(audience))
     sent = 0
     async with httpx.AsyncClient(timeout=30) as client:
         for r in rows:
             try:
+                if has_image:
+                    payload = {
+                        "chat_id": r["user_id"], "photo": body.image_file_id,
+                        "caption": text, "parse_mode": "HTML",
+                    }
+                    method = "sendPhoto"
+                else:
+                    payload = {
+                        "chat_id": r["user_id"], "text": text, "parse_mode": "HTML",
+                    }
+                    method = "sendMessage"
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
                 resp = await client.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    json={"chat_id": r["user_id"], "text": body.message, "parse_mode": "HTML"})
-                if resp.status_code == 200:
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=payload)
+                if resp.status_code == 200 and resp.json().get("ok"):
                     sent += 1
             except Exception:
                 pass
     async with _pool.acquire() as con:
         await con.execute(
-            "INSERT INTO broadcast_history (message, audience, sent, total) VALUES ($1,$2,$3,$4)",
-            body.message, audience, sent, len(rows))
+            "INSERT INTO broadcast_history "
+            "(message, audience, sent, total, image_file_id, button_text, button_url) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            body.message, audience, sent, len(rows),
+            body.image_file_id, body.button_text, body.button_url)
     return {"ok": True, "sent": sent, "total": len(rows)}
 
 
@@ -715,3 +816,71 @@ async def user_balance_logs(uid: int, _: bool = Depends(require_auth)):
             "SELECT id, delta, balance_after, reason, created_at FROM balance_logs "
             "WHERE user_id=$1 ORDER BY id DESC LIMIT 50", uid)
     return {"logs": [dict(r) for r in rows]}
+
+
+# ==================== REFERRAL ====================
+class ReferralSettingsBody(BaseModel):
+    enabled: bool = True
+    reward_type: str = "balance"   # 'balance' | 'quota'
+    reward_amount: int = 5000
+
+
+@app.get("/api/referral/settings")
+async def get_referral_settings_ep(_: bool = Depends(require_auth)):
+    enabled = await get_setting("referral_enabled", "1")
+    reward_type = await get_setting("referral_reward_type", "balance")
+    reward_amount = await get_setting("referral_reward_amount", "5000")
+    return {
+        "enabled": enabled == "1",
+        "reward_type": reward_type if reward_type in ("balance", "quota") else "balance",
+        "reward_amount": int(reward_amount),
+    }
+
+
+@app.post("/api/referral/settings")
+async def save_referral_settings_ep(body: ReferralSettingsBody, _: bool = Depends(require_auth)):
+    if body.reward_type not in ("balance", "quota"):
+        raise HTTPException(status_code=400, detail="reward_type harus 'balance' atau 'quota'")
+    if body.reward_amount < 0:
+        raise HTTPException(status_code=400, detail="Nominal bonus tidak valid")
+    await set_setting("referral_enabled", "1" if body.enabled else "0")
+    await set_setting("referral_reward_type", body.reward_type)
+    await set_setting("referral_reward_amount", int(body.reward_amount))
+    return {"ok": True}
+
+
+@app.get("/api/referral/stats")
+async def referral_stats(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        total = await con.fetchval("SELECT count(*) FROM referrals") or 0
+        rewarded = await con.fetchval("SELECT count(*) FROM referrals WHERE status='rewarded'") or 0
+        pending = total - rewarded
+        balance_paid = await con.fetchval(
+            "SELECT COALESCE(SUM(reward_amount),0) FROM referrals WHERE status='rewarded' AND reward_type='balance'") or 0
+        quota_paid = await con.fetchval(
+            "SELECT COALESCE(SUM(reward_amount),0) FROM referrals WHERE status='rewarded' AND reward_type='quota'") or 0
+        top = await con.fetch(
+            "SELECT r.referrer_id, u.username, u.first_name, count(*) AS total, "
+            "count(*) FILTER (WHERE r.status='rewarded') AS rewarded "
+            "FROM referrals r LEFT JOIN users u ON u.user_id=r.referrer_id "
+            "GROUP BY r.referrer_id, u.username, u.first_name "
+            "ORDER BY rewarded DESC, total DESC LIMIT 10")
+    return {
+        "total": total, "rewarded": rewarded, "pending": pending,
+        "balance_paid": balance_paid, "quota_paid": quota_paid,
+        "top_referrers": [dict(r) for r in top],
+    }
+
+
+@app.get("/api/referral/list")
+async def referral_list(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT r.*, "
+            "ru.username AS referrer_username, ru.first_name AS referrer_first_name, "
+            "rd.username AS referred_username, rd.first_name AS referred_first_name "
+            "FROM referrals r "
+            "LEFT JOIN users ru ON ru.user_id=r.referrer_id "
+            "LEFT JOIN users rd ON rd.user_id=r.referred_id "
+            "ORDER BY r.id DESC LIMIT 200")
+    return {"referrals": [dict(r) for r in rows]}

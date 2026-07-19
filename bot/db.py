@@ -100,6 +100,9 @@ async def _create_schema():
                 audience   TEXT   NOT NULL DEFAULT 'all',   -- all|premium|free
                 sent       INT    NOT NULL DEFAULT 0,
                 total      INT    NOT NULL DEFAULT 0,
+                image_file_id TEXT,                          -- optional Telegram photo file_id
+                button_text   TEXT,                           -- optional inline button label
+                button_url    TEXT,                           -- optional inline button URL
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
 
@@ -124,6 +127,17 @@ async def _create_schema():
                 reason        TEXT,
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+
+            CREATE TABLE IF NOT EXISTS referrals (
+                id            BIGSERIAL PRIMARY KEY,
+                referrer_id   BIGINT NOT NULL,
+                referred_id   BIGINT NOT NULL UNIQUE,        -- a user can only be referred once
+                reward_type   TEXT   NOT NULL DEFAULT 'balance', -- 'balance' | 'quota' (snapshot at signup time)
+                reward_amount BIGINT NOT NULL DEFAULT 0,         -- snapshot at signup time
+                status        TEXT   NOT NULL DEFAULT 'pending', -- pending|rewarded
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                rewarded_at   TIMESTAMPTZ
+            );
             """
         )
         # migrations for existing DBs
@@ -133,6 +147,11 @@ async def _create_schema():
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_name TEXT;")
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS balance BIGINT NOT NULL DEFAULT 0;")
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_quota INT NOT NULL DEFAULT 0;")
+        await con.execute("ALTER TABLE broadcast_history ADD COLUMN IF NOT EXISTS image_file_id TEXT;")
+        await con.execute("ALTER TABLE broadcast_history ADD COLUMN IF NOT EXISTS button_text TEXT;")
+        await con.execute("ALTER TABLE broadcast_history ADD COLUMN IF NOT EXISTS button_url TEXT;")
 
 
 # ---------- users ----------
@@ -151,6 +170,11 @@ async def upsert_user(user_id: int, username: str | None, first_name: str | None
             """,
             user_id, username, first_name, lang,
         )
+
+
+async def user_exists(user_id: int) -> bool:
+    async with _pool.acquire() as con:
+        return bool(await con.fetchval("SELECT 1 FROM users WHERE user_id=$1", user_id))
 
 
 async def is_banned(user_id: int) -> bool:
@@ -327,6 +351,110 @@ async def get_daily_limit(fallback: int) -> int:
         return int(val) if val is not None else fallback
     except ValueError:
         return fallback
+
+
+# ---------- referral bonus quota (extra images beyond the daily cap) ----------
+async def get_bonus_quota(user_id: int) -> int:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT bonus_quota FROM users WHERE user_id=$1", user_id)
+        return row["bonus_quota"] if row else 0
+
+
+async def add_bonus_quota(user_id: int, n: int) -> int:
+    """Grant (or, with negative n, revoke) bonus quota. Returns new total."""
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "UPDATE users SET bonus_quota = GREATEST(0, bonus_quota + $2) WHERE user_id=$1 RETURNING bonus_quota",
+            user_id, n)
+        if not row:
+            await con.execute(
+                "INSERT INTO users (user_id, bonus_quota) VALUES ($1, GREATEST(0,$2)) "
+                "ON CONFLICT (user_id) DO UPDATE SET bonus_quota = GREATEST(0, users.bonus_quota + $2)",
+                user_id, n)
+            row = await con.fetchrow("SELECT bonus_quota FROM users WHERE user_id=$1", user_id)
+        return row["bonus_quota"]
+
+
+async def consume_bonus_quota(user_id: int, n: int = 1) -> bool:
+    """Atomically consume n bonus images if available. Returns True if consumed."""
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "UPDATE users SET bonus_quota = bonus_quota - $2 "
+            "WHERE user_id=$1 AND bonus_quota >= $2 RETURNING bonus_quota",
+            user_id, n)
+        return row is not None
+
+
+# ---------- referral system ----------
+async def get_referral_settings() -> dict:
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT key, value FROM settings WHERE key IN "
+            "('referral_enabled','referral_reward_type','referral_reward_amount')")
+        s = {r["key"]: r["value"] for r in rows}
+        return {
+            "enabled": s.get("referral_enabled", "1") == "1",
+            "reward_type": s.get("referral_reward_type", "balance") if s.get("referral_reward_type") in ("balance", "quota") else "balance",
+            "reward_amount": int(s.get("referral_reward_amount", "5000")),
+        }
+
+
+async def record_referral_signup(referrer_id: int, referred_id: int) -> bool:
+    """Called once, right when a brand-new user starts the bot via a referral link.
+    Snapshots the current reward config so later admin changes don't retroactively
+    affect already-pending referrals. Returns True if recorded.
+    """
+    if referrer_id == referred_id:
+        return False
+    settings = await get_referral_settings()
+    if not settings["enabled"]:
+        return False
+    async with _pool.acquire() as con:
+        # referrer must actually exist
+        exists = await con.fetchval("SELECT 1 FROM users WHERE user_id=$1", referrer_id)
+        if not exists:
+            return False
+        try:
+            await con.execute(
+                "INSERT INTO referrals (referrer_id, referred_id, reward_type, reward_amount) "
+                "VALUES ($1,$2,$3,$4)",
+                referrer_id, referred_id, settings["reward_type"], settings["reward_amount"])
+            await con.execute("UPDATE users SET referred_by=$2 WHERE user_id=$1", referred_id, referrer_id)
+            return True
+        except asyncpg.UniqueViolationError:
+            return False  # already referred before
+
+
+async def try_reward_referral(referred_id: int) -> dict | None:
+    """If `referred_id` has a pending referral (i.e. just passed the subscription
+    gate for the first time), grant the reward to their referrer and mark it done.
+    Returns {referrer_id, reward_type, reward_amount} on success, else None.
+    """
+    async with _pool.acquire() as con:
+        async with con.transaction():
+            row = await con.fetchrow(
+                "SELECT * FROM referrals WHERE referred_id=$1 AND status='pending' FOR UPDATE",
+                referred_id)
+            if not row:
+                return None
+            await con.execute(
+                "UPDATE referrals SET status='rewarded', rewarded_at=now() WHERE id=$1", row["id"])
+    # apply reward outside the row lock (uses its own connections/transactions)
+    if row["reward_type"] == "quota":
+        await add_bonus_quota(row["referrer_id"], row["reward_amount"])
+    else:
+        await adjust_balance(row["referrer_id"], row["reward_amount"], "Bonus referral")
+    return {"referrer_id": row["referrer_id"], "reward_type": row["reward_type"], "reward_amount": row["reward_amount"]}
+
+
+async def get_referral_stats(user_id: int) -> dict:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "SELECT count(*) AS total, count(*) FILTER (WHERE status='rewarded') AS rewarded "
+            "FROM referrals WHERE referrer_id=$1", user_id)
+        bonus_quota = await con.fetchval("SELECT bonus_quota FROM users WHERE user_id=$1", user_id) or 0
+        return {"total": row["total"] or 0, "rewarded": row["rewarded"] or 0,
+                "pending": (row["total"] or 0) - (row["rewarded"] or 0), "bonus_quota": bonus_quota}
 
 
 # ---------- premium / plans / payments ----------

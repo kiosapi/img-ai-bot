@@ -38,7 +38,7 @@ def help_text(lang: str = "id") -> str:
     return t("help", lang)
 
 
-def quota_text(used: int, limit: int, premium: dict | None = None, lang: str = "id") -> str:
+def quota_text(used: int, limit: int, premium: dict | None = None, lang: str = "id", bonus_quota: int = 0) -> str:
     bar = quota_bar(used, limit)
     left = sisa_text(used, limit, lang)
     lines = [t("quota_title", lang)]
@@ -51,6 +51,8 @@ def quota_text(used: int, limit: int, premium: dict | None = None, lang: str = "
     total = "♾️" if limit == 0 else str(limit)
     lines.append(t("quota_used", lang, used=used, total=total))
     lines.append(t("quota_left", lang, left=left))
+    if bonus_quota > 0:
+        lines.append(t("quota_bonus", lang, n=bonus_quota))
     lines.append(t("quota_reset", lang))
     if not premium:
         lines.append(t("quota_upsell", lang))
@@ -74,9 +76,10 @@ def main_menu(lang: str = "id"):
     kb.button(text=t("menu_quota", lang), callback_data="menu:quota")
     kb.button(text=t("menu_balance", lang), callback_data="menu:balance")
     kb.button(text=t("menu_upgrade", lang), callback_data="menu:upgrade")
+    kb.button(text=t("menu_referral", lang), callback_data="menu:referral")
     kb.button(text=t("menu_lang", lang), callback_data="menu:lang")
     kb.button(text=t("menu_help", lang), callback_data="menu:help")
-    kb.adjust(2, 2, 2, 1, 1)
+    kb.adjust(2, 2, 2, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -261,3 +264,25 @@ def deposit_history_text(deposits: list[dict], lang: str = "id") -> str:
             icon=icon.get(d["status"], "•"), id=d["id"], amount=rupiah(d["amount"]),
             status=t(status_key.get(d["status"], "status_pending"), lang)))
     return "\n".join(lines)
+
+
+# ---------------- Referral UI ----------------
+def referral_text(bot_username: str, user_id: int, stats: dict, reward_type: str, reward_amount: int, lang: str = "id") -> str:
+    link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    reward_desc = (
+        (t("referral_reward_balance", lang, amount=rupiah(reward_amount)) if reward_type == "balance"
+         else t("referral_reward_quota", lang, n=reward_amount))
+    )
+    return t(
+        "referral_text", lang,
+        link=link, reward_desc=reward_desc,
+        total=stats["total"], rewarded=stats["rewarded"], pending=stats["pending"],
+        bonus_quota=stats["bonus_quota"],
+    )
+
+
+def referral_menu(lang: str = "id"):
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t("back_home", lang), callback_data="menu:home")
+    kb.adjust(1)
+    return kb.as_markup()

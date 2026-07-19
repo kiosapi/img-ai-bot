@@ -20,7 +20,9 @@ async def _lang(user_id: int) -> str:
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     u = message.from_user
-    await db.upsert_user(u.id, u.username, u.first_name, u.language_code)
+    # NOTE: user upsert + referral deep-link capture happens in
+    # SubscriptionMiddleware (runs before this handler, even for users who
+    # haven't joined the channel yet) — see middlewares/subscription.py.
     lang = await _lang(u.id)
     await message.answer(ui.welcome(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
 
@@ -43,7 +45,8 @@ async def cmd_quota(message: Message):
     limit = await db.effective_daily_limit(message.from_user.id, DEFAULT_DAILY_LIMIT)
     used = await db.get_today_count(message.from_user.id)
     premium = await db.get_premium_info(message.from_user.id)
-    await message.answer(ui.quota_text(used, limit, premium, lang), reply_markup=ui.back_menu(lang))
+    bonus_quota = await db.get_bonus_quota(message.from_user.id)
+    await message.answer(ui.quota_text(used, limit, premium, lang, bonus_quota), reply_markup=ui.back_menu(lang))
 
 
 @router.message(Command("upgrade"))
@@ -90,7 +93,8 @@ async def nav_quota(callback: CallbackQuery):
     limit = await db.effective_daily_limit(callback.from_user.id, DEFAULT_DAILY_LIMIT)
     used = await db.get_today_count(callback.from_user.id)
     premium = await db.get_premium_info(callback.from_user.id)
-    await safe_edit(callback.message, ui.quota_text(used, limit, premium, lang), reply_markup=ui.back_menu(lang))
+    bonus_quota = await db.get_bonus_quota(callback.from_user.id)
+    await safe_edit(callback.message, ui.quota_text(used, limit, premium, lang, bonus_quota), reply_markup=ui.back_menu(lang))
     await callback.answer()
 
 
@@ -114,6 +118,31 @@ async def nav_edit(callback: CallbackQuery):
     lang = await _lang(callback.from_user.id)
     await callback.message.answer(ui.edit_ask(lang), reply_markup=ForceReply(input_field_placeholder="..."))
     await callback.answer()
+
+
+@router.callback_query(F.data == "menu:referral")
+async def nav_referral(callback: CallbackQuery):
+    lang = await _lang(callback.from_user.id)
+    bot_user = await callback.bot.get_me()
+    stats = await db.get_referral_stats(callback.from_user.id)
+    settings = await db.get_referral_settings()
+    text = ui.referral_text(
+        bot_user.username, callback.from_user.id, stats,
+        settings["reward_type"], settings["reward_amount"], lang)
+    await safe_edit(callback.message, text, reply_markup=ui.referral_menu(lang))
+    await callback.answer()
+
+
+@router.message(Command("referral"))
+async def cmd_referral(message: Message):
+    lang = await _lang(message.from_user.id)
+    bot_user = await message.bot.get_me()
+    stats = await db.get_referral_stats(message.from_user.id)
+    settings = await db.get_referral_settings()
+    text = ui.referral_text(
+        bot_user.username, message.from_user.id, stats,
+        settings["reward_type"], settings["reward_amount"], lang)
+    await message.answer(text, reply_markup=ui.referral_menu(lang))
 
 
 # ---------------- Language switch ----------------
