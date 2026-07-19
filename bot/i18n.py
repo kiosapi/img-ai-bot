@@ -57,8 +57,8 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "edit_ask": (
             "🖌️ <b>Edit Foto</b>\n\n"
-            "Kirim <b>foto</b> yang mau diedit, sertakan <b>caption</b> berisi instruksi.\n"
-            "<i>contoh caption: jadikan gaya lukisan cat air</i>"
+            "Balas pesan ini dengan mengirim <b>foto</b> yang mau diedit beserta <b>instruksi</b> (sebagai caption foto).\n"
+            "<i>contoh: jadikan gaya lukisan cat air</i>"
         ),
         "size_pick": "📐 <b>Pilih Ukuran Gambar</b>",
         "size_set": "✅ Ukuran diset ke <b>{size}</b>",
@@ -244,8 +244,8 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "edit_ask": (
             "🖌️ <b>Edit Photo</b>\n\n"
-            "Send the <b>photo</b> you want to edit, with a <b>caption</b> containing your instructions.\n"
-            "<i>example caption: turn it into a watercolor painting</i>"
+            "Reply to this message by sending the <b>photo</b> you want to edit with your <b>instructions</b> as its caption.\n"
+            "<i>example: turn it into a watercolor painting</i>"
         ),
         "size_pick": "📐 <b>Choose Image Size</b>",
         "size_set": "✅ Size set to <b>{size}</b>",

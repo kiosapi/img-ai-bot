@@ -112,7 +112,7 @@ async def nav_gen(callback: CallbackQuery):
 @router.callback_query(F.data == "menu:edit")
 async def nav_edit(callback: CallbackQuery):
     lang = await _lang(callback.from_user.id)
-    await callback.message.answer(ui.edit_ask(lang))
+    await callback.message.answer(ui.edit_ask(lang), reply_markup=ForceReply(input_field_placeholder="..."))
     await callback.answer()
 
 
