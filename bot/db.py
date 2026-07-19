@@ -173,6 +173,20 @@ async def _create_schema():
         await con.execute("ALTER TABLE aiogram_states ADD COLUMN IF NOT EXISTS state TEXT;")
         await con.execute("ALTER TABLE aiogram_states ADD COLUMN IF NOT EXISTS data JSONB NOT NULL DEFAULT '{}'::jsonb;")
         await con.execute("ALTER TABLE aiogram_states ADD COLUMN IF NOT EXISTS updated TIMESTAMPTZ NOT NULL DEFAULT now();")
+        # ---- feature 17 sticker packs ----
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sticker_packs (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                pack_name TEXT NOT NULL UNIQUE,
+                title TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                sticker_count INT DEFAULT 0
+            );
+            """
+        )
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_sticker_pack TEXT;")
 
 
 # ---------- users ----------
@@ -785,5 +799,136 @@ async def try_checkin(user_id: int) -> tuple[bool, int, int, int]:
             await con.execute(
                 "UPDATE users SET bonus_quota = bonus_quota + $2 WHERE user_id=$1", user_id, bonus)
             return True, new_streak, new_total, bonus
+
+
+# ---------- feature flags (10,14,15,17) ----------
+# Setting keys:
+#   feat_enhance_enabled, feat_batch_enabled, feat_watermark_enabled, feat_sticker_enabled
+#   watermark_text, watermark_free_only, enhance_model
+#   batch_limit_free, batch_limit_premium, sticker_max_per_pack
+
+
+async def feat_prompt_enhance_enabled() -> bool:
+    v = await get_setting("feat_enhance_enabled", "1")
+    return v == "1"
+
+
+async def feat_batch_enabled() -> bool:
+    v = await get_setting("feat_batch_enabled", "1")
+    return v == "1"
+
+
+async def feat_watermark_enabled() -> bool:
+    v = await get_setting("feat_watermark_enabled", "0")
+    return v == "1"
+
+
+async def feat_sticker_enabled() -> bool:
+    v = await get_setting("feat_sticker_enabled", "1")
+    return v == "1"
+
+
+async def feat_checkin_enabled() -> bool:
+    # check-in already exists, keep flag for uniformity
+    v = await get_setting("feat_checkin_enabled", "1")
+    return v == "1"
+
+
+async def get_watermark_text() -> str:
+    return await get_setting("watermark_text", "Buat di @imgaai_bot") or "Buat di @imgaai_bot"
+
+
+async def get_watermark_free_only() -> bool:
+    v = await get_setting("watermark_free_only", "1")
+    return v == "1"
+
+
+async def get_enhance_model() -> str:
+    return await get_setting("enhance_model", "gpt-4o-mini") or "gpt-4o-mini"
+
+
+async def get_batch_limits() -> tuple[int, int]:
+    """Return (free_limit, premium_limit)."""
+    free_raw = await get_setting("batch_limit_free", "1")
+    prem_raw = await get_setting("batch_limit_premium", "4")
+    try:
+        free_lim = int(free_raw)
+    except (ValueError, TypeError):
+        free_lim = 1
+    try:
+        prem_lim = int(prem_raw)
+    except (ValueError, TypeError):
+        prem_lim = 4
+    # clamp to sane range
+    free_lim = max(1, min(free_lim, 10))
+    prem_lim = max(1, min(prem_lim, 10))
+    return free_lim, prem_lim
+
+
+async def get_batch_limit_free() -> int:
+    f, _ = await get_batch_limits()
+    return f
+
+
+async def get_batch_limit_premium() -> int:
+    _, p = await get_batch_limits()
+    return p
+
+
+async def get_sticker_max_per_pack() -> int:
+    raw = await get_setting("sticker_max_per_pack", "10")
+    try:
+        v = int(raw)
+    except (ValueError, TypeError):
+        v = 10
+    return max(1, min(v, 120))
+
+
+# ---------- sticker packs (feature 17) ----------
+async def get_sticker_pack(pack_name: str) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM sticker_packs WHERE pack_name=$1", pack_name)
+        return dict(row) if row else None
+
+
+async def get_user_sticker_packs(user_id: int) -> list[dict]:
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT * FROM sticker_packs WHERE user_id=$1 ORDER BY created_at DESC", user_id
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_user_last_sticker_pack(user_id: int) -> str | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT last_sticker_pack FROM users WHERE user_id=$1", user_id)
+        return row["last_sticker_pack"] if row and row["last_sticker_pack"] else None
+
+
+async def set_user_last_sticker_pack(user_id: int, pack_name: str):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE users SET last_sticker_pack=$2 WHERE user_id=$1", user_id, pack_name)
+
+
+async def create_sticker_pack(user_id: int, pack_name: str, title: str | None = None) -> dict:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "INSERT INTO sticker_packs (user_id, pack_name, title) VALUES ($1,$2,$3) "
+            "ON CONFLICT (pack_name) DO NOTHING RETURNING *",
+            user_id, pack_name, title,
+        )
+        if row:
+            return dict(row)
+        row2 = await con.fetchrow("SELECT * FROM sticker_packs WHERE pack_name=$1", pack_name)
+        return dict(row2) if row2 else {"user_id": user_id, "pack_name": pack_name, "title": title, "sticker_count": 0}
+
+
+async def increment_sticker_count(pack_name: str) -> int:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "UPDATE sticker_packs SET sticker_count = sticker_count + 1 WHERE pack_name=$1 RETURNING sticker_count",
+            pack_name,
+        )
+        return row["sticker_count"] if row else 0
 
 

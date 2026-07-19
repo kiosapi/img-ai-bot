@@ -358,8 +358,14 @@ async def broadcast(body: BroadcastBody, _: bool = Depends(require_auth)):
 async def get_settings(_: bool = Depends(require_auth)):
     limit = await get_setting("daily_limit", str(DEFAULT_DAILY_LIMIT))
     maint = await get_setting("maintenance", "0")
+    # feature flags full set
+    ff_keys = ["feat_enhance_enabled","feat_batch_enabled","feat_watermark_enabled","watermark_text","watermark_free_only","enhance_model","batch_limit_free","batch_limit_premium","feat_sticker_enabled","sticker_max_per_pack","feat_checkin_enabled","feat_inline_enabled","feat_myworks_enabled","feat_style_enabled","feat_queue_enabled"]
+    ff_vals = {}
+    for k in ff_keys:
+        v = await get_setting(k, "")
+        ff_vals[k] = v
     return {"daily_limit": int(limit), "maintenance": maint == "1",
-            "channel": REQUIRED_CHANNEL, "model": "gpt-image-2"}
+            "channel": REQUIRED_CHANNEL, "model": "gpt-image-2", "features": ff_vals}
 
 
 class SettingsBody(BaseModel):
@@ -372,6 +378,63 @@ async def save_settings(body: SettingsBody, _: bool = Depends(require_auth)):
     await set_setting("daily_limit", max(0, body.daily_limit))
     await set_setting("maintenance", "1" if body.maintenance else "0")
     return {"ok": True}
+
+
+# ---------- Feature Flags full control ----------
+class FeatureFlagsBody(BaseModel):
+    feat_enhance_enabled: str | None = None
+    feat_batch_enabled: str | None = None
+    feat_watermark_enabled: str | None = None
+    watermark_text: str | None = None
+    watermark_free_only: str | None = None
+    enhance_model: str | None = None
+    batch_limit_free: str | None = None
+    batch_limit_premium: str | None = None
+    feat_sticker_enabled: str | None = None
+    sticker_max_per_pack: str | None = None
+    feat_checkin_enabled: str | None = None
+    feat_inline_enabled: str | None = None
+    feat_myworks_enabled: str | None = None
+    feat_style_enabled: str | None = None
+    feat_queue_enabled: str | None = None
+
+
+@app.get("/api/features")
+async def get_features(_: bool = Depends(require_auth)):
+    defaults = {
+        "feat_enhance_enabled": "1",
+        "feat_batch_enabled": "1",
+        "feat_watermark_enabled": "0",
+        "watermark_text": "Buat di @imgaai_bot",
+        "watermark_free_only": "1",
+        "enhance_model": "gpt-4o-mini",
+        "batch_limit_free": "1",
+        "batch_limit_premium": "4",
+        "feat_sticker_enabled": "1",
+        "sticker_max_per_pack": "10",
+        "feat_checkin_enabled": "1",
+        "feat_inline_enabled": "1",
+        "feat_myworks_enabled": "1",
+        "feat_style_enabled": "1",
+        "feat_queue_enabled": "1",
+    }
+    out = {}
+    for k, dv in defaults.items():
+        v = await get_setting(k, dv)
+        if v is None or v == "":
+            v = dv
+        out[k] = v
+    return out
+
+
+@app.post("/api/features")
+async def save_features(body: FeatureFlagsBody, _: bool = Depends(require_auth)):
+    data = body.model_dump(exclude_none=True)
+    for k, v in data.items():
+        # sanitize: strip
+        sv = str(v).strip()[:500]
+        await set_setting(k, sv)
+    return {"ok": True, "saved": list(data.keys())}
 
 # ---------------- User detail ----------------
 @app.get("/api/users/{uid}")

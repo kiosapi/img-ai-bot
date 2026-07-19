@@ -1,27 +1,46 @@
-"""Image-to-image / edit: user sends a photo with a caption prompt (in the same
-message), OR sends the photo first and the instruction as a separate
-follow-up message (very common on mobile Telegram clients) — both flows are
-supported. Editing itself is shared between them via _do_edit().
-Also hosts result actions: regen / variation / hd / editthis.
-"""
+"""Image-to-image / edit: photo + prompt, plus result actions callbacks."""
 import io
-import random
+import db
+import ui
+import cubence
+import styles as style_presets
+import feature_flags as ff
+from i18n import t
+from tgutil import ProgressAnimator, safe_edit
+from states import EditStates
+from gen_queue import QUEUE
 from aiogram import Router, F
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
-import db
-import ui
-import cubence
-import styles as style_presets
-from i18n import t
-from handlers.generate import check_and_consume, _size_of, is_maintenance, _style_of
-from tgutil import ProgressAnimator, safe_edit
-from states import EditStates
-from gen_queue import QUEUE
-
 router = Router()
+
+
+async def is_maintenance() -> bool:
+    return (await db.get_setting("maintenance", "0")) == "1"
+
+
+async def _size_of(uid: int):
+    from config import DEFAULT_SIZE
+    return await db.get_pref_size(uid, DEFAULT_SIZE)
+
+
+async def _style_of(uid: int):
+    return await db.get_pref_style(uid, "none") or "none"
+
+
+async def _should_watermark(uid: int):
+    enabled = await ff.watermark_enabled()
+    if not enabled:
+        return False, ""
+    wa_text = await ff.watermark_text()
+    free_only = await ff.watermark_free_only()
+    if free_only:
+        is_prem = await db.is_premium(uid)
+        if is_prem:
+            return False, ""
+    return True, wa_text
 
 
 async def _has_pending_deposit_awaiting_proof(user_id: int) -> bool:
@@ -29,27 +48,30 @@ async def _has_pending_deposit_awaiting_proof(user_id: int) -> bool:
     return bool(dep and not dep["proof_file_id"])
 
 
+async def _check_and_consume(uid: int):
+    from config import DEFAULT_DAILY_LIMIT
+    return await db.check_and_consume_atomic(uid, DEFAULT_DAILY_LIMIT)
+
+
 async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str | None = None):
     lang = await db.get_lang(message.from_user.id)
-    if not await QUEUE.acquire(message.from_user.id):
-        await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
-        return
+    if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+        if not await QUEUE.acquire(message.from_user.id):
+            await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
+            return
     if await is_maintenance():
         await QUEUE.release(message.from_user.id)
         await message.answer(t("maintenance", lang))
         return
-
-    allowed, used, limit = await check_and_consume(message.from_user.id)
+    allowed, used, limit, _bonus = await _check_and_consume(message.from_user.id)
     if not allowed:
         await QUEUE.release(message.from_user.id)
-        await message.answer(
-            t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)),
-            reply_markup=ui.back_menu(lang))
+        await message.answer(t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)), reply_markup=ui.back_menu(lang))
         return
-
     size = force_size or await _size_of(message.from_user.id)
     style_id = await _style_of(message.from_user.id)
     styled_prompt = style_presets.apply_style(prompt, style_id)
+    wm_on, wm_text = await _should_watermark(message.from_user.id)
 
     status = await message.answer(t("editing", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
     animator = ProgressAnimator(message.bot, message.chat.id, status, t("editing", lang, used=used, limit=limit))
@@ -58,27 +80,19 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
         buf = io.BytesIO()
         await message.bot.download(file_id, destination=buf)
         image_bytes = buf.getvalue()
-
         img = await cubence.edit_image(image_bytes, styled_prompt, size=size)
-        sent = await message.answer_photo(
-            BufferedInputFile(img, filename="edited.png"),
-            caption=t("edit_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
-            reply_markup=ui.result_menu(lang, gen_id=0),
-        )
+        cap = t("edit_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
+        if wm_on and wm_text:
+            cap += f"\n\n{wm_text}"
+        sent = await message.answer_photo(BufferedInputFile(img, filename="edited.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
         try:
             result_file_id = sent.photo[-1].file_id
         except Exception:
             result_file_id = None
-        gen_id = await db.log_generation(
-            message.from_user.id, "edit", prompt, size, True,
-            result_file_id=result_file_id, style_id=style_id if style_id != "none" else None
-        )
+        gen_id = await db.log_generation(message.from_user.id, "edit", prompt, size, True, result_file_id=result_file_id, style_id=style_id if style_id != "none" else None)
         if result_file_id and gen_id:
             try:
-                await sent.edit_caption(
-                    caption=t("edit_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
-                    reply_markup=ui.result_menu(lang, gen_id=gen_id, file_id=result_file_id)
-                )
+                await sent.edit_caption(caption=cap, reply_markup=ui.result_menu(lang, gen_id=gen_id, file_id=result_file_id))
             except Exception:
                 pass
     except cubence.CubenceError as e:
@@ -88,7 +102,8 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
         await db.log_generation(message.from_user.id, "edit", prompt, size, False, style_id=style_id if style_id != "none" else None)
         await message.answer(t("edit_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
     finally:
-        await QUEUE.release(message.from_user.id)
+        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+            await QUEUE.release(message.from_user.id)
         await animator.stop()
         try:
             await status.delete()
@@ -96,22 +111,25 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
             pass
 
 
+async def _do_generate_from_edit(msg: Message, prompt: str, variation=False, force_size: str | None = None):
+    # avoid circular import — import here
+    from handlers.generate import _do_generate
+    await _do_generate(msg, prompt, variation=variation, force_size=force_size)
+
+
 @router.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     lang = await db.get_lang(message.from_user.id)
     prompt = (message.caption or "").strip()
-    file_id = message.photo[-1].file_id  # highest resolution
-
+    file_id = message.photo[-1].file_id
     fsm_state = await state.get_state()
     if fsm_state is None and await _has_pending_deposit_awaiting_proof(message.from_user.id):
         return
-
     if not prompt:
         await state.set_state(EditStates.waiting_instruction)
         await state.update_data(file_id=file_id)
         await message.answer(ui.edit_ask(lang))
         return
-
     await state.clear()
     await _do_edit(message, file_id, prompt)
 
@@ -128,7 +146,6 @@ async def fsm_edit_instruction(message: Message, state: FSMContext):
     await _do_edit(message, file_id, message.text.strip())
 
 
-# ---- editthis flow: user clicked Edit on a result, then we ask instruction ----
 @router.message(EditStates.waiting_editthis_instruction, F.text, ~F.text.startswith("/"))
 async def fsm_editthis_instruction(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -142,73 +159,55 @@ async def fsm_editthis_instruction(message: Message, state: FSMContext):
     await _do_edit(message, file_id, message.text.strip())
 
 
-# ---- result action callbacks ----
 @router.callback_query(F.data.startswith("regen:"))
 async def cb_regen(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
-    try:
-        gen_id = int(callback.data.split(":", 1)[1])
+    try: gen_id = int(callback.data.split(":", 1)[1])
     except Exception:
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt"):
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     await callback.answer(t("generating", lang, used=0, limit=0)[:30])
-    # reuse _do_generate flow but via message object
-    await _do_generate(callback.message, gen["prompt"])
+    await _do_generate_from_edit(callback.message, gen["prompt"])
 
 
 @router.callback_query(F.data.startswith("var:"))
 async def cb_variation(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
-    try:
-        gen_id = int(callback.data.split(":", 1)[1])
+    try: gen_id = int(callback.data.split(":", 1)[1])
     except Exception:
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt"):
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     await callback.answer("✨ Variation")
-    await _do_generate(callback.message, gen["prompt"], variation=True)
+    await _do_generate_from_edit(callback.message, gen["prompt"], variation=True)
 
 
 @router.callback_query(F.data.startswith("hd:"))
 async def cb_hd(callback: CallbackQuery):
-    """HD = re-generate with larger size (1536x1024 if current was square, else max)."""
     lang = await db.get_lang(callback.from_user.id)
-    try:
-        gen_id = int(callback.data.split(":", 1)[1])
+    try: gen_id = int(callback.data.split(":", 1)[1])
     except Exception:
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt"):
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     await callback.answer("🔍 HD")
-    # Force larger size: pick landscape max for HD
-    await _do_generate(callback.message, gen["prompt"], force_size="1536x1024")
+    await _do_generate_from_edit(callback.message, gen["prompt"], force_size="1536x1024")
 
 
 @router.callback_query(F.data.startswith("editthis:"))
 async def cb_editthis(callback: CallbackQuery, state: FSMContext):
     lang = await db.get_lang(callback.from_user.id)
-    try:
-        gen_id = int(callback.data.split(":", 1)[1])
+    try: gen_id = int(callback.data.split(":", 1)[1])
     except Exception:
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("result_file_id"):
-        await callback.answer(t("invalid_data", lang), show_alert=True)
-        return
+        await callback.answer(t("invalid_data", lang), show_alert=True); return
     await state.set_state(EditStates.waiting_editthis_instruction)
     await state.update_data(editthis_file_id=gen["result_file_id"])
-    await callback.message.answer(
-        t("edit_ask", lang) + "\n\n" + t("myworks_regen_hint", lang)
-    )
+    await callback.message.answer(t("edit_ask", lang) + "\n\n" + t("myworks_regen_hint", lang))
     await callback.answer()

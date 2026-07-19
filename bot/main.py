@@ -11,7 +11,7 @@ from aiogram.types import BotCommand
 import db
 import config
 from middlewares.subscription import SubscriptionMiddleware
-from handlers import start, generate, edit, premium, balance, style, myworks, checkin, inline
+from handlers import start, generate, edit, premium, balance, style, myworks, checkin, inline, batch, sticker
 
 logging.basicConfig(level=logging.INFO)
 
@@ -65,6 +65,8 @@ async def main():
     dp.include_router(myworks.router)
     dp.include_router(premium.router)
     dp.include_router(balance.router)
+    dp.include_router(batch.router)
+    dp.include_router(sticker.router)
     dp.include_router(inline.router)
 
     logging.info("Bot starting (polling)...")

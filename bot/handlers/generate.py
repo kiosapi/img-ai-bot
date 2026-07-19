@@ -1,4 +1,4 @@
-"""Text-to-image generation: /generate, FSM prompt flow, size selection + queue limit."""
+"""Text-to-image generation: /generate, FSM prompt flow, size selection + queue + enhance + watermark + batch."""
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -8,6 +8,7 @@ import db
 import ui
 import cubence
 import styles as style_presets
+import feature_flags as ff
 from i18n import t
 from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE
 from tgutil import safe_edit, ProgressAnimator
@@ -36,9 +37,21 @@ async def _apply_user_style(user_id: int, prompt: str) -> tuple[str, str]:
 
 
 async def check_and_consume(user_id: int) -> tuple[bool, int, int]:
-    from config import DEFAULT_DAILY_LIMIT as _fallback
-    allowed, used, limit, _bonus = await db.check_and_consume_atomic(user_id, _fallback)
+    allowed, used, limit, _bonus = await db.check_and_consume_atomic(user_id, DEFAULT_DAILY_LIMIT)
     return allowed, used, limit
+
+
+async def _should_watermark(user_id: int) -> tuple[bool, str]:
+    enabled = await ff.watermark_enabled()
+    if not enabled:
+        return False, ""
+    wa_text = await ff.watermark_text()
+    free_only = await ff.watermark_free_only()
+    if free_only:
+        is_prem = await db.is_premium(user_id)
+        if is_prem:
+            return False, ""
+    return True, wa_text
 
 
 @router.message(Command("size"))
@@ -58,9 +71,8 @@ async def set_size(callback: CallbackQuery):
     await callback.answer(t("size_saved", lang))
 
 
-async def _do_generate(message: Message, prompt: str, variation: bool = False, force_size: str | None = None):
+async def _do_generate(message: Message, prompt: str, variation: bool = False, force_size: str | None = None, enhance: bool = False):
     lang = await db.get_lang(message.from_user.id)
-    # queue 1/user guard
     if not await QUEUE.acquire(message.from_user.id):
         await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
         return
@@ -79,20 +91,39 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
         return
 
     size = force_size or await _size_of(message.from_user.id)
-    styled_prompt, style_id = await _apply_user_style(message.from_user.id, prompt)
+    # enhance
+    final_prompt = prompt
+    if enhance:
+        if not await ff.enhance_enabled():
+            enhance = False
+        else:
+            try:
+                from enhancer import enhance_prompt
+                enhanced = await enhance_prompt(prompt)
+                if enhanced and len(enhanced.strip()) > 5:
+                    final_prompt = enhanced
+            except Exception:
+                pass
+
+    styled_prompt, style_id = await _apply_user_style(message.from_user.id, final_prompt)
     if variation:
         import random
         var_hints = ["different angle", "different lighting", "slightly different composition", "alternative perspective", "with slight variation"]
         styled_prompt = f"{styled_prompt}, {random.choice(var_hints)}"
+
+    wm_on, wm_text = await _should_watermark(message.from_user.id)
 
     status = await message.answer(t("generating", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
     animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used, limit=limit))
     animator.start()
     try:
         img = await cubence.generate_image(styled_prompt, size=size)
+        caption_base = t("gen_done", lang, prompt=final_prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
+        if wm_on and wm_text:
+            caption_base += f"\n\n{wm_text}"
         sent = await message.answer_photo(
             BufferedInputFile(img, filename="image.png"),
-            caption=t("gen_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
+            caption=caption_base,
             reply_markup=ui.result_menu(lang, gen_id=0, file_id=None),
         )
         try:
@@ -100,22 +131,22 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
         except Exception:
             result_file_id = None
         gen_id = await db.log_generation(
-            message.from_user.id, "generate", prompt, size, True,
+            message.from_user.id, "generate", final_prompt, size, True,
             result_file_id=result_file_id, style_id=style_id if style_id != "none" else None
         )
         if result_file_id and gen_id:
             try:
                 await sent.edit_caption(
-                    caption=t("gen_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang)),
+                    caption=caption_base,
                     reply_markup=ui.result_menu(lang, gen_id=gen_id, file_id=result_file_id)
                 )
             except Exception:
                 pass
     except cubence.CubenceError as e:
-        await db.log_generation(message.from_user.id, "generate", prompt, size, False, style_id=style_id if style_id != "none" else None)
+        await db.log_generation(message.from_user.id, "generate", final_prompt, size, False, style_id=style_id if style_id != "none" else None)
         await message.answer(t("gen_failed", lang, err=e), reply_markup=ui.back_menu(lang))
     except Exception as e:
-        await db.log_generation(message.from_user.id, "generate", prompt, size, False, style_id=style_id if style_id != "none" else None)
+        await db.log_generation(message.from_user.id, "generate", final_prompt, size, False, style_id=style_id if style_id != "none" else None)
         await message.answer(t("gen_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
     finally:
         await QUEUE.release(message.from_user.id)
@@ -132,13 +163,40 @@ async def cmd_generate(message: Message):
     if not prompt:
         await message.answer(ui.prompt_ask(await db.get_lang(message.from_user.id)))
         return
-    await _do_generate(message, prompt)
+    # check if enhance flag /gen then prompt contains --enhance? simple heuristic: if starts with ✨
+    enhance = False
+    if prompt.startswith("✨ "):
+        enhance = True
+        prompt = prompt[2:].strip()
+    await _do_generate(message, prompt, enhance=enhance)
 
 
+@router.callback_query(F.data.startswith("enhance:"))
+async def cb_enhance(callback: CallbackQuery):
+    lang = await db.get_lang(callback.from_user.id)
+    if not await ff.enhance_enabled():
+        await callback.answer(t("feature_disabled", lang), show_alert=True)
+        return
+    try:
+        gen_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer(t("invalid_data", lang), show_alert=True)
+        return
+    gen = await db.get_generation_by_id(gen_id)
+    if not gen or not gen.get("prompt"):
+        await callback.answer(t("invalid_data", lang), show_alert=True)
+        return
+    await callback.answer("✨ Enhancing...")
+    await _do_generate(callback.message, gen["prompt"], enhance=True)
+
+
+# Reply while in the "type a prompt" state
 @router.message(GenerateStates.waiting_prompt, F.text, ~F.text.startswith("/"))
 async def fsm_prompt(message: Message, state: FSMContext):
+    data = await state.get_data()
+    enhance = data.get("enhance", False)
     await state.clear()
-    await _do_generate(message, message.text.strip())
+    await _do_generate(message, message.text.strip(), enhance=enhance)
 
 
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))

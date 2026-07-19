@@ -213,6 +213,25 @@ TEXTS: dict[str, dict[str, str]] = {
         # ---- queue ----
         "busy_generating": "⏳ Kamu masih dalam proses generate/edit. Tunggu selesai dulu ya!",
 
+        # ---- enhance / batch / watermark / sticker (10,14,15,17) ----
+        "feature_disabled": "🚫 Fitur ini sedang dimatikan admin.",
+        "menu_sticker": "🎖️ Sticker",
+        "gen_placeholder": "Ketik prompt gambar...",
+        "result_enhance": "✨ Enhance",
+        "result_sticker": "🎖️ Sticker",
+        "result_batch": "🎲 Batch x4",
+        "enhance_doing": "✨ Enhancing prompt...",
+        "enhance_done": "✨ <b>Prompt Enhanced</b>\n\nSebelum: <i>{before}</i>\nSesudah: <i>{after}</i>\n\nGenerate dengan prompt baru?",
+        "batch_generating": "🎲 <b>Batch x{n}</b> generating... sisa kuota {used}/{limit}",
+        "batch_done_item": "🎲 <b>Batch {idx}/{total}</b>\n📝 {prompt}\n📐 {size}",
+        "batch_usage": "🎲 <b>Batch Generate</b>\n\nGunakan: /batch <n> <prompt>\nContoh: /batch 4 kucing astronot\n\nLimit kamu: <b>{free}</b> per batch (premium {prem})",
+        "sticker_intro": "🎖️ <b>Sticker Pack Generator</b>\n\nUbah karya kamu jadi sticker Telegram!\nMax per pack: <b>{max}</b>\nPack kamu: <code>{pack}</code>\n\nPilih karya dari /myworks → tombol 🎖️ Sticker → akan ditambah ke pack kamu.\nLink pack: https://t.me/addstickers/{pack}",
+        "sticker_added": "✅ Ditambah ke pack <code>{pack}</code>\n🔗 {link}",
+        "sticker_created": "✅ Pack baru dibuat!",
+        "sticker_full": "🚫 Pack penuh (max {max}). Buat pack baru di dashboard.",
+        "sticker_dl_fail": "❌ Gagal download gambar: {err}",
+        "sticker_create_fail": "❌ Gagal buat sticker: {err}",
+
         # ---- referral ----
         "referral_text": (
             "🎁 <b>Ajak Teman</b>\n\n"
@@ -445,6 +464,25 @@ TEXTS: dict[str, dict[str, str]] = {
         "checkin_button": "✅ Check-in Today",
 
         "busy_generating": "⏳ You still have a generation in progress. Wait for it to finish!",
+
+        # ---- enhance / batch / watermark / sticker (10,14,15,17) ----
+        "feature_disabled": "🚫 This feature is disabled by admin.",
+        "menu_sticker": "🎖️ Sticker",
+        "gen_placeholder": "Type image prompt...",
+        "result_enhance": "✨ Enhance",
+        "result_sticker": "🎖️ Sticker",
+        "result_batch": "🎲 Batch x4",
+        "enhance_doing": "✨ Enhancing prompt...",
+        "enhance_done": "✨ <b>Prompt Enhanced</b>\n\nBefore: <i>{before}</i>\nAfter: <i>{after}</i>",
+        "batch_generating": "🎲 <b>Batch x{n}</b> generating... quota {used}/{limit}",
+        "batch_done_item": "🎲 <b>Batch {idx}/{total}</b>\n📝 {prompt}\n📐 {size}",
+        "batch_usage": "🎲 <b>Batch Generate</b>\n\nUse: /batch <n> <prompt>\nExample: /batch 4 cat astronaut\n\nYour limit: <b>{free}</b> per batch (premium {prem})",
+        "sticker_intro": "🎖️ <b>Sticker Pack Generator</b>\n\nTurn your creations into Telegram stickers!\nMax per pack: <b>{max}</b>\nYour pack: <code>{pack}</code>\n\nPick artwork from /myworks → 🎖️ Sticker button → added to your pack.\nLink: https://t.me/addstickers/{pack}",
+        "sticker_added": "✅ Added to pack <code>{pack}</code>\n🔗 {link}",
+        "sticker_created": "✅ New pack created!",
+        "sticker_full": "🚫 Pack full (max {max}). Create new pack in dashboard.",
+        "sticker_dl_fail": "❌ Failed to download image: {err}",
+        "sticker_create_fail": "❌ Failed to create sticker: {err}",
 
         # ---- referral ----
         "referral_text": (

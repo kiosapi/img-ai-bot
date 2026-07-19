@@ -9,7 +9,6 @@ import styles as style_presets
 BRAND = "Image Generator"
 
 def quota_bar(used: int, limit: int, slots: int = 10) -> str:
-    """Render a visual progress bar like ▰▰▰▱▱▱▱▱▱▱. limit 0 = unlimited."""
     if limit == 0:
         return "♾️ Unlimited"
     if limit < 0:
@@ -23,13 +22,11 @@ def rupiah(n: int) -> str:
 
 
 def sisa_text(used: int, limit: int, lang: str = "id") -> str:
-    """Human 'remaining' phrase, unlimited-aware."""
     if limit == 0:
         return t("quota_unlimited", lang)
     return t("quota_images", lang, n=max(0, limit - used))
 
 
-# ---------------- Text templates ----------------
 def welcome(name: str, lang: str = "id") -> str:
     return t("welcome", lang, name=name, brand=BRAND)
 
@@ -67,7 +64,6 @@ def edit_ask(lang: str = "id") -> str:
     return t("edit_ask", lang)
 
 
-# ---------------- Keyboards ----------------
 def main_menu(lang: str = "id"):
     kb = InlineKeyboardBuilder()
     kb.button(text=t("menu_gen", lang), callback_data="menu:gen")
@@ -75,6 +71,7 @@ def main_menu(lang: str = "id"):
     kb.button(text=t("menu_style", lang), callback_data="menu:style")
     kb.button(text=t("menu_myworks", lang), callback_data="myworks:0")
     kb.button(text=t("menu_checkin", lang), callback_data="menu:checkin")
+    kb.button(text=t("menu_sticker", lang), callback_data="menu:sticker")
     kb.button(text=t("menu_size", lang), callback_data="menu:size")
     kb.button(text=t("menu_quota", lang), callback_data="menu:quota")
     kb.button(text=t("menu_balance", lang), callback_data="menu:balance")
@@ -82,7 +79,7 @@ def main_menu(lang: str = "id"):
     kb.button(text=t("menu_referral", lang), callback_data="menu:referral")
     kb.button(text=t("menu_lang", lang), callback_data="menu:lang")
     kb.button(text=t("menu_help", lang), callback_data="menu:help")
-    kb.adjust(2, 2, 2, 2, 2, 2)
+    kb.adjust(2, 2, 2, 2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -90,6 +87,12 @@ def back_menu(lang: str = "id"):
     kb = InlineKeyboardBuilder()
     kb.button(text=t("back_home", lang), callback_data="menu:home")
     return kb.as_markup()
+
+
+def gen_prompt_menu(lang: str = "id", enhance_on: bool = False):
+    # Instead of ForceReply, we give inline hint buttons
+    from aiogram.types import ForceReply
+    return ForceReply(input_field_placeholder=t("gen_placeholder", lang) if t("gen_placeholder", lang) != "gen_placeholder" else "...")
 
 
 def size_menu(current: str, lang: str = "id"):
@@ -108,16 +111,18 @@ def size_menu(current: str, lang: str = "id"):
 
 
 def result_menu(lang: str = "id", gen_id: int | None = None, file_id: str | None = None):
-    """Modern result actions: Regen, Variation, Edit, HD, Style, Menu."""
     kb = InlineKeyboardBuilder()
     if gen_id:
         kb.button(text=t("result_regen", lang), callback_data=f"regen:{gen_id}")
         kb.button(text=t("result_var", lang), callback_data=f"var:{gen_id}")
+        kb.button(text=t("result_enhance", lang), callback_data=f"enhance:{gen_id}")
         kb.button(text=t("result_edit_this", lang), callback_data=f"editthis:{gen_id}")
         kb.button(text=t("result_hd", lang), callback_data=f"hd:{gen_id}")
+        kb.button(text=t("result_sticker", lang), callback_data=f"sticker:add:{gen_id}")
+        kb.button(text=t("result_batch", lang), callback_data=f"batch:{gen_id}:4")
         kb.button(text=t("result_style", lang), callback_data="menu:style")
         kb.button(text=t("result_menu", lang), callback_data="menu:home")
-        kb.adjust(2, 2, 2)
+        kb.adjust(3, 3, 3)
     else:
         kb.button(text=t("result_again", lang), callback_data="menu:gen")
         kb.button(text=t("result_menu", lang), callback_data="menu:home")
@@ -134,7 +139,6 @@ def join_keyboard(lang: str = "id"):
     return kb.as_markup()
 
 
-# ---------------- Language ----------------
 def lang_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text="🇮🇩 Indonesia", callback_data="lang:id")
@@ -143,7 +147,6 @@ def lang_menu():
     return kb.as_markup()
 
 
-# ---------------- Style presets ----------------
 def style_menu(current: str | None, lang: str = "id"):
     kb = InlineKeyboardBuilder()
     for sid, info in style_presets.STYLES.items():
@@ -155,16 +158,13 @@ def style_menu(current: str | None, lang: str = "id"):
     return kb.as_markup()
 
 
-# ---------------- My Works / History ----------------
 def myworks_menu(generations: list[dict], total: int, offset: int, limit: int, lang: str = "id"):
     kb = InlineKeyboardBuilder()
     for g in generations:
-        # short prompt preview
         preview = (g.get("prompt") or "")[:30].replace("\n", " ")
         if len((g.get("prompt") or "")) > 30:
             preview += "..."
         kb.button(text=f"🖼️ #{g['id']} {preview}", callback_data=f"view:{g['id']}")
-    # pagination
     has_prev = offset > 0
     has_next = offset + limit < total
     if has_prev:
@@ -172,8 +172,6 @@ def myworks_menu(generations: list[dict], total: int, offset: int, limit: int, l
     if has_next:
         kb.button(text=t("myworks_next", lang), callback_data=f"myworks:{offset+limit}")
     kb.button(text=t("back_home", lang), callback_data="menu:home")
-    # adjust: items then nav row then back
-    # dynamic
     if generations:
         if has_prev or has_next:
             kb.adjust(*([1]*len(generations) + [2 if (has_prev and has_next) else 1, 1]))
@@ -188,10 +186,12 @@ def myworks_view_menu(gen_id: int, lang: str = "id"):
     kb = InlineKeyboardBuilder()
     kb.button(text=t("result_regen", lang), callback_data=f"regen:{gen_id}")
     kb.button(text=t("result_var", lang), callback_data=f"var:{gen_id}")
+    kb.button(text=t("result_enhance", lang), callback_data=f"enhance:{gen_id}")
     kb.button(text=t("result_edit_this", lang), callback_data=f"editthis:{gen_id}")
+    kb.button(text=t("result_sticker", lang), callback_data=f"sticker:add:{gen_id}")
     kb.button(text=t("back", lang), callback_data="myworks:0")
     kb.button(text=t("back_home", lang), callback_data="menu:home")
-    kb.adjust(2, 2, 1)
+    kb.adjust(3, 2, 2)
     return kb.as_markup()
 
 
@@ -206,9 +206,7 @@ def plans_menu(plans: list[dict], lang: str = "id"):
     kb = InlineKeyboardBuilder()
     for p in plans:
         limit = t("plan_unlimited", lang) if p["daily_limit"] == 0 else t("plan_per_day", lang, n=p["daily_limit"])
-        kb.button(
-            text=f"💎 {p['name']} — {rupiah(p['price'])} ({limit})",
-            callback_data=f"plan:{p['id']}")
+        kb.button(text=f"💎 {p['name']} — {rupiah(p['price'])} ({limit})", callback_data=f"plan:{p['id']}")
     kb.button(text=t("back_home", lang), callback_data="menu:home")
     kb.adjust(1)
     return kb.as_markup()
@@ -259,7 +257,6 @@ def order_rejected(note: str | None, lang: str = "id") -> str:
     return base + tail
 
 
-# ---------------- Balance / Deposit UI ----------------
 def balance_menu(lang: str = "id"):
     kb = InlineKeyboardBuilder()
     kb.button(text=t("balance_topup_button", lang), callback_data="deposit:new")
@@ -324,26 +321,14 @@ def deposit_history_text(deposits: list[dict], lang: str = "id") -> str:
     status_key = {"pending": "status_pending", "approved": "status_approved", "rejected": "status_rejected"}
     lines = [t("deposit_history_empty", lang).split("\n\n")[0] + "\n"]
     for d in deposits:
-        lines.append(t(
-            "deposit_history_item", lang,
-            icon=icon.get(d["status"], "•"), id=d["id"], amount=rupiah(d["amount"]),
-            status=t(status_key.get(d["status"], "status_pending"), lang)))
+        lines.append(t("deposit_history_item", lang, icon=icon.get(d["status"], "•"), id=d["id"], amount=rupiah(d["amount"]), status=t(status_key.get(d["status"], "status_pending"), lang)))
     return "\n".join(lines)
 
 
-# ---------------- Referral UI ----------------
 def referral_text(bot_username: str, user_id: int, stats: dict, reward_type: str, reward_amount: int, lang: str = "id") -> str:
     link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-    reward_desc = (
-        (t("referral_reward_balance", lang, amount=rupiah(reward_amount)) if reward_type == "balance"
-         else t("referral_reward_quota", lang, n=reward_amount))
-    )
-    return t(
-        "referral_text", lang,
-        link=link, reward_desc=reward_desc,
-        total=stats["total"], rewarded=stats["rewarded"], pending=stats["pending"],
-        bonus_quota=stats["bonus_quota"],
-    )
+    reward_desc = (t("referral_reward_balance", lang, amount=rupiah(reward_amount)) if reward_type == "balance" else t("referral_reward_quota", lang, n=reward_amount))
+    return t("referral_text", lang, link=link, reward_desc=reward_desc, total=stats["total"], rewarded=stats["rewarded"], pending=stats["pending"], bonus_quota=stats["bonus_quota"])
 
 
 def referral_menu(lang: str = "id"):
@@ -353,7 +338,6 @@ def referral_menu(lang: str = "id"):
     return kb.as_markup()
 
 
-# ---------------- Check-in ----------------
 def checkin_menu(lang: str = "id", can: bool = True):
     kb = InlineKeyboardBuilder()
     if can:
@@ -362,3 +346,13 @@ def checkin_menu(lang: str = "id", can: bool = True):
     kb.adjust(1)
     return kb.as_markup()
 
+
+# ---------------- Sticker ----------------
+def sticker_menu(packs: list[dict], lang: str = "id", can_create: bool = True):
+    kb = InlineKeyboardBuilder()
+    for p in packs:
+        kb.button(text=f"📦 {p['pack_name']} ({p.get('sticker_count',0)})", callback_data=f"sticker:view:{p['pack_name']}")
+    # link to explore? just back
+    kb.button(text=t("back_home", lang), callback_data="menu:home")
+    kb.adjust(1)
+    return kb.as_markup()

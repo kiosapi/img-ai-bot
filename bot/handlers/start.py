@@ -24,15 +24,12 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     u = message.from_user
     lang = await _lang(u.id)
-    # inline switch_pm support
     payload = (message.text or "").partition(" ")[2].strip()
     if payload.startswith("gen_"):
-        # prompt encoded with _ as space from inline
         raw = payload[4:].replace("_", " ").strip()
         if raw and raw not in ("inline_empty", "inline_new"):
             await message.answer(ui.welcome(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
             from handlers.generate import _do_generate
-            # Schedule generate after welcome; use FSM wait
             lang2 = await _lang(u.id)
             await message.answer(f"🎨 <b>Generate:</b> <i>{raw}</i>\n\nMulai membuat...", reply_markup=ui.back_menu(lang2))
             await _do_generate(message, raw)
@@ -123,7 +120,11 @@ async def nav_size(callback: CallbackQuery):
 async def nav_gen(callback: CallbackQuery, state: FSMContext):
     lang = await _lang(callback.from_user.id)
     await state.set_state(GenerateStates.waiting_prompt)
-    await callback.message.answer(ui.prompt_ask(lang), reply_markup=ForceReply(input_field_placeholder="..."))
+    # check if enhance enabled to show enhance option
+    import feature_flags as ff
+    enhance_on = await ff.enhance_enabled()
+    kb = ui.gen_prompt_menu(lang, enhance_on=enhance_on)
+    await callback.message.answer(ui.prompt_ask(lang), reply_markup=kb)
     await callback.answer()
 
 

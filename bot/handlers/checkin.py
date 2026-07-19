@@ -24,6 +24,9 @@ def _checkin_text(info: dict, lang: str) -> str:
 @router.message(Command("checkin"))
 async def cmd_checkin(message: Message):
     lang = await db.get_lang(message.from_user.id)
+    if (await db.get_setting("feat_checkin_enabled", "1")) == "0":
+        await message.answer(t("feature_disabled", lang), reply_markup=ui.back_menu(lang))
+        return
     info = await db.get_checkin_info(message.from_user.id)
     today = date.today()
     if info.get("last_checkin") == today:
