@@ -1,4 +1,4 @@
-"""Text-to-image generation: /generate, FSM prompt flow, size selection + queue + enhance + watermark + batch."""
+"""Text-to-image generation: uses provider router (Cubence + Right Codes), model selection via DB."""
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -6,7 +6,6 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
 import db
 import ui
-import cubence
 import styles as style_presets
 import feature_flags as ff
 from i18n import t
@@ -60,7 +59,6 @@ async def set_size(callback: CallbackQuery):
 
 async def _do_generate(message: Message, prompt: str, variation: bool = False, force_size: str | None = None, enhance: bool = False):
     lang = await db.get_lang(message.from_user.id)
-    # queue gate
     if (await db.get_setting("feat_queue_enabled", "1")) == "1":
         if not await QUEUE.acquire(message.from_user.id):
             await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
@@ -82,6 +80,13 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
         return
 
     size = force_size or await _size_of(message.from_user.id)
+
+    # resolve model for user (privacy: no provider leak)
+    try:
+        active_model = await db.get_active_model_for_user(message.from_user.id)
+    except Exception:
+        active_model = None
+
     final_prompt = prompt
     if enhance:
         if not await ff.enhance_enabled():
@@ -101,7 +106,6 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
         var_hints = ["different angle", "different lighting", "slightly different composition", "alternative perspective", "with slight variation"]
         styled_prompt = f"{styled_prompt}, {random.choice(var_hints)}"
 
-    # watermark check (do after consume to not waste quota if disabled? we already consumed, so keep simple)
     try:
         from watermark import should_watermark, apply_watermark_image
         wm_on, wm_text = await should_watermark(message.from_user.id)
@@ -112,17 +116,27 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
     animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used, limit=limit))
     animator.start()
     try:
-        img = await cubence.generate_image(styled_prompt, size=size)
-        # apply image watermark if enabled
+        from providers import generate_image as provider_generate, ProviderError
+        img = await provider_generate(active_model, styled_prompt, size=size, user_id=message.from_user.id)
+
         if wm_on and wm_text:
             try:
                 img = apply_watermark_image(img, wm_text)
             except Exception:
                 pass
 
+        # display current model name without provider
+        model_label = ""
+        if active_model:
+            model_label = active_model.get("display_name") or active_model.get("id") or ""
+
         caption_base = t("gen_done", lang, prompt=final_prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
+        if model_label:
+            # append model info if setting enabled? keep subtle, no provider leak
+            caption_base += f"\nModel: {model_label}"
         if wm_on and wm_text:
             caption_base += f"\n\n{wm_text}"
+
         sent = await message.answer_photo(
             BufferedInputFile(img, filename="image.png"),
             caption=caption_base,
@@ -132,10 +146,19 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
             result_file_id = sent.photo[-1].file_id
         except Exception:
             result_file_id = None
+
         gen_id = await db.log_generation(
             message.from_user.id, "generate", final_prompt, size, True,
             result_file_id=result_file_id, style_id=style_id if style_id != "none" else None
         )
+        # also update model_id column if exist
+        if gen_id and active_model:
+            try:
+                async with db._pool.acquire() as con:
+                    await con.execute("UPDATE generations SET model_id=$2 WHERE id=$1", gen_id, active_model["id"])
+            except Exception:
+                pass
+
         if result_file_id and gen_id:
             try:
                 await sent.edit_caption(
@@ -144,12 +167,16 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
                 )
             except Exception:
                 pass
-    except cubence.CubenceError as e:
-        await db.log_generation(message.from_user.id, "generate", final_prompt, size, False, style_id=style_id if style_id != "none" else None)
-        await message.answer(t("gen_failed", lang, err=e), reply_markup=ui.back_menu(lang))
+
     except Exception as e:
-        await db.log_generation(message.from_user.id, "generate", final_prompt, size, False, style_id=style_id if style_id != "none" else None)
-        await message.answer(t("gen_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
+        # normalize ProviderError or CubenceError
+        err_text = str(e)
+        # if old cubence error fallback
+        try:
+            await db.log_generation(message.from_user.id, "generate", final_prompt, size, False, style_id=style_id if style_id != "none" else None)
+        except Exception:
+            pass
+        await message.answer(t("gen_failed", lang, err=err_text[:500]), reply_markup=ui.back_menu(lang))
     finally:
         if (await db.get_setting("feat_queue_enabled", "1")) == "1":
             await QUEUE.release(message.from_user.id)

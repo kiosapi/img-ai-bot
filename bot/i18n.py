@@ -216,6 +216,7 @@ TEXTS: dict[str, dict[str, str]] = {
         # ---- enhance / batch / watermark / sticker (10,14,15,17) ----
         "feature_disabled": "🚫 Fitur ini sedang dimatikan admin.",
         "menu_sticker": "🎖️ Sticker",
+        "menu_model": "🤖 Model",
         "gen_placeholder": "Ketik prompt gambar...",
         "result_enhance": "✨ Enhance",
         "result_sticker": "🎖️ Sticker",
@@ -231,6 +232,11 @@ TEXTS: dict[str, dict[str, str]] = {
         "sticker_full": "🚫 Pack penuh (max {max}). Buat pack baru di dashboard.",
         "sticker_dl_fail": "❌ Gagal download gambar: {err}",
         "sticker_create_fail": "❌ Gagal buat sticker: {err}",
+
+        "model_no_models": "Tidak ada model aktif. Hubungi admin.",
+        "model_pick": "🤖 <b>Pilih Model Gambar</b>\n\nPilih model favoritmu. Model ini akan dipakai untuk semua generasimu:",
+        "model_set": "Model diatur ke {model} ✅",
+        "model_inactive": "Model tidak aktif",
 
         # ---- referral ----
         "referral_text": (
@@ -499,6 +505,11 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "referral_reward_balance": "Balance {amount}",
         "referral_reward_quota": "{n} extra image quota",
+
+        "model_no_models": "No active models available. Contact admin.",
+        "model_pick": "🤖 <b>Choose Image Model</b>\n\nPick your preferred model. It will be used for all your generations:",
+        "model_set": "Model set to {model} ✅",
+        "model_inactive": "Model is inactive",
 
         "lang_pick": "🌐 <b>Choose Language / Pilih Bahasa</b>",
         "lang_id": "🇮🇩 Indonesia",

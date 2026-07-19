@@ -187,6 +187,61 @@ async def _create_schema():
             """
         )
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_sticker_pack TEXT;")
+        # ---- multi-provider system (Cubence + Right Codes) ----
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS providers (
+                id TEXT PRIMARY KEY,               -- slug: cubence, rightcodes
+                name TEXT NOT NULL,                -- display hidden from user
+                base_url TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_models (
+                id TEXT PRIMARY KEY,                -- e.g. gpt-image-2, flux-pro, etc
+                provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+                display_name TEXT NOT NULL,         -- shown to user (privacy: no provider)
+                description TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                capabilities JSONB NOT NULL DEFAULT '{}'::jsonb, -- {txt2img:true, img2img:true, sizes:[...]}
+                sort_order INT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_model_id TEXT;")
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS model_id TEXT;")
+        # settings for API keys are stored in settings table, but add encrypted helper columns if needed — for now use settings
+        # ensure default providers
+        await con.execute(
+            """
+            INSERT INTO providers (id, name, base_url, is_active)
+            VALUES ('cubence', 'Cubence', 'https://api-dmit.cubence.com', true)
+            ON CONFLICT (id) DO NOTHING;
+            """
+        )
+        await con.execute(
+            """
+            INSERT INTO providers (id, name, base_url, is_active)
+            VALUES ('rightcodes', 'Right Codes', 'https://www.right.codes/draw', false)
+            ON CONFLICT (id) DO NOTHING;
+            """
+        )
+        # default model for cubence
+        await con.execute(
+            """
+            INSERT INTO ai_models (id, provider_id, display_name, description, is_active, is_default, sort_order, capabilities)
+            VALUES ('gpt-image-2', 'cubence', 'GPT Image 2', 'High quality general purpose', true, true, 0, '{\"txt2img\": true, \"img2img\": true, \"sizes\": [\"1024x1024\", \"1024x1536\", \"1536x1024\"]}'::jsonb)
+            ON CONFLICT (id) DO NOTHING;
+            """
+        )
 
 
 # ---------- users ----------
@@ -930,5 +985,135 @@ async def increment_sticker_count(pack_name: str) -> int:
             pack_name,
         )
         return row["sticker_count"] if row else 0
+
+
+# ---------- providers + models ----------
+async def list_providers() -> list[dict]:
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT * FROM providers ORDER BY id")
+        return [dict(r) for r in rows]
+
+
+async def get_provider(provider_id: str) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM providers WHERE id=$1", provider_id)
+        return dict(row) if row else None
+
+
+async def upsert_provider(provider_id: str, name: str, base_url: str, is_active: bool = True):
+    async with _pool.acquire() as con:
+        await con.execute(
+            """
+            INSERT INTO providers (id, name, base_url, is_active, updated_at)
+            VALUES ($1,$2,$3,$4, now())
+            ON CONFLICT (id) DO UPDATE SET name=$2, base_url=$3, is_active=$4, updated_at=now()
+            """,
+            provider_id, name, base_url, is_active,
+        )
+
+
+async def list_models(active_only: bool = False, include_inactive_provider: bool = False) -> list[dict]:
+    async with _pool.acquire() as con:
+        if active_only:
+            # only models active AND provider active (user-facing)
+            q = """
+                SELECT m.*, p.is_active as provider_active FROM ai_models m
+                JOIN providers p ON p.id = m.provider_id
+                WHERE m.is_active = true AND p.is_active = true
+                ORDER BY m.sort_order, m.display_name
+            """
+            rows = await con.fetch(q)
+        else:
+            # admin: all
+            if include_inactive_provider:
+                rows = await con.fetch("SELECT m.*, p.is_active as provider_active, p.name as provider_name FROM ai_models m JOIN providers p ON p.id=m.provider_id ORDER BY p.id, m.sort_order, m.display_name")
+            else:
+                rows = await con.fetch("SELECT m.*, p.is_active as provider_active, p.name as provider_name FROM ai_models m LEFT JOIN providers p ON p.id=m.provider_id ORDER BY m.sort_order, m.id")
+        return [dict(r) for r in rows]
+
+
+async def get_model(model_id: str) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM ai_models WHERE id=$1", model_id)
+        return dict(row) if row else None
+
+
+async def get_active_model_for_user(user_id: int) -> dict | None:
+    """Resolve user's preferred model, fallback to default active model."""
+    async with _pool.acquire() as con:
+        # user pref
+        pref_row = await con.fetchrow("SELECT pref_model_id FROM users WHERE user_id=$1", user_id)
+        pref = pref_row["pref_model_id"] if pref_row and pref_row["pref_model_id"] else None
+        if pref:
+            r = await con.fetchrow(
+                "SELECT m.* FROM ai_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=$1 AND m.is_active=true AND p.is_active=true",
+                pref,
+            )
+            if r:
+                return dict(r)
+        # default
+        r = await con.fetchrow(
+            "SELECT m.* FROM ai_models m JOIN providers p ON p.id=m.provider_id WHERE m.is_default=true AND m.is_active=true AND p.is_active=true LIMIT 1"
+        )
+        if r:
+            return dict(r)
+        # any active
+        r = await con.fetchrow(
+            "SELECT m.* FROM ai_models m JOIN providers p ON p.id=m.provider_id WHERE m.is_active=true AND p.is_active=true ORDER BY m.sort_order LIMIT 1"
+        )
+        return dict(r) if r else None
+
+
+async def get_default_model() -> dict | None:
+    async with _pool.acquire() as con:
+        r = await con.fetchrow(
+            "SELECT m.* FROM ai_models m JOIN providers p ON p.id=m.provider_id WHERE m.is_default=true AND m.is_active=true AND p.is_active=true LIMIT 1"
+        )
+        if r:
+            return dict(r)
+        r = await con.fetchrow(
+            "SELECT m.* FROM ai_models m JOIN providers p ON p.id=m.provider_id WHERE m.is_active=true AND p.is_active=true ORDER BY m.sort_order LIMIT 1"
+        )
+        return dict(r) if r else None
+
+
+async def set_user_model(user_id: int, model_id: str):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE users SET pref_model_id=$2 WHERE user_id=$1", user_id, model_id)
+
+
+async def upsert_model(model_id: str, provider_id: str, display_name: str, description: str | None = None, is_active: bool = True, is_default: bool = False, sort_order: int = 0, capabilities: dict | None = None):
+    caps = capabilities or {}
+    import json
+    async with _pool.acquire() as con:
+        if is_default:
+            # clear other defaults
+            await con.execute("UPDATE ai_models SET is_default=false WHERE provider_id=$1", provider_id)
+        await con.execute(
+            """
+            INSERT INTO ai_models (id, provider_id, display_name, description, is_active, is_default, sort_order, capabilities, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb, now())
+            ON CONFLICT (id) DO UPDATE SET provider_id=$2, display_name=$3, description=$4, is_active=$5, is_default=$6, sort_order=$7, capabilities=$8::jsonb, updated_at=now()
+            """,
+            model_id, provider_id, display_name, description, is_active, is_default, sort_order, json.dumps(caps),
+        )
+
+
+async def delete_model(model_id: str):
+    async with _pool.acquire() as con:
+        await con.execute("DELETE FROM ai_models WHERE id=$1", model_id)
+
+
+async def set_default_model(model_id: str):
+    async with _pool.acquire() as con:
+        # get provider of this model
+        row = await con.fetchrow("SELECT provider_id FROM ai_models WHERE id=$1", model_id)
+        if not row:
+            return
+        pid = row["provider_id"]
+        await con.execute("UPDATE ai_models SET is_default=false WHERE provider_id=$1", pid)
+        await con.execute("UPDATE ai_models SET is_default=true WHERE id=$1", model_id)
+
+
 
 

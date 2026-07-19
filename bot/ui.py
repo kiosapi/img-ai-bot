@@ -67,6 +67,7 @@ def edit_ask(lang: str = "id") -> str:
 def main_menu(lang: str = "id"):
     kb = InlineKeyboardBuilder()
     kb.button(text=t("menu_gen", lang), callback_data="menu:gen")
+    kb.button(text=t("menu_model", lang) if t("menu_model", lang) != "menu_model" else "🤖 Model", callback_data="menu:model")
     kb.button(text=t("menu_edit", lang), callback_data="menu:edit")
     kb.button(text=t("menu_style", lang), callback_data="menu:style")
     kb.button(text=t("menu_myworks", lang), callback_data="myworks:0")
@@ -79,7 +80,7 @@ def main_menu(lang: str = "id"):
     kb.button(text=t("menu_referral", lang), callback_data="menu:referral")
     kb.button(text=t("menu_lang", lang), callback_data="menu:lang")
     kb.button(text=t("menu_help", lang), callback_data="menu:help")
-    kb.adjust(2, 2, 2, 2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 2, 2, 2, 2)
     return kb.as_markup()
 
 
@@ -344,6 +345,24 @@ def checkin_menu(lang: str = "id", can: bool = True):
         kb.button(text=t("checkin_button", lang), callback_data="checkin:do")
     kb.button(text=t("back_home", lang), callback_data="menu:home")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def model_menu(models: list[dict], current_id: str | None, lang: str = "id"):
+    kb = InlineKeyboardBuilder()
+    for m in models:
+        mid = m.get("id") or m.get("model_id") or ""
+        display = m.get("display_name") or mid
+        desc = m.get("description") or ""
+        # mark current
+        prefix = "✅ " if mid == current_id else ""
+        # keep label short, no provider name
+        label = f"{prefix}{display}"
+        if len(label) > 40:
+            label = label[:37] + "..."
+        kb.button(text=label, callback_data=f"model:{mid}")
+    kb.button(text=t("back_home", lang), callback_data="menu:home")
+    kb.adjust(2)
     return kb.as_markup()
 
 

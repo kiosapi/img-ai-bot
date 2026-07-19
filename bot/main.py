@@ -11,7 +11,7 @@ from aiogram.types import BotCommand
 import db
 import config
 from middlewares.subscription import SubscriptionMiddleware, MaintenanceMiddleware
-from handlers import start, generate, edit, premium, balance, style, myworks, checkin, inline, batch, sticker
+from handlers import start, generate, edit, premium, balance, style, myworks, checkin, inline, batch, sticker, model
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +20,7 @@ async def _set_commands(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="start", description="🏠 Menu utama / Main menu"),
         BotCommand(command="generate", description="🎨 Buat gambar / Generate image"),
+        BotCommand(command="model", description="🤖 Pilih Model / Select Model"),
         BotCommand(command="enhance", description="✨ Enhance prompt + generate"),
         BotCommand(command="batch", description="🎲 Batch x4 generate (cth: /batch 4 kucing)"),
         BotCommand(command="sticker", description="🎖️ Sticker pack dari karya"),
@@ -71,6 +72,7 @@ async def main():
     dp.include_router(myworks.router)
     dp.include_router(premium.router)
     dp.include_router(balance.router)
+    dp.include_router(model.router)
     dp.include_router(batch.router)
     dp.include_router(sticker.router)
     dp.include_router(inline.router)

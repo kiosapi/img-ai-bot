@@ -436,8 +436,260 @@ async def save_features(body: FeatureFlagsBody, _: bool = Depends(require_auth))
         await set_setting(k, sv)
     return {"ok": True, "saved": list(data.keys())}
 
+
+# ---------------- Providers & Models (multi-provider) ----------------
+class ProviderSaveBody(BaseModel):
+    id: str
+    name: str | None = None
+    base_url: str
+    is_active: bool = True
+
+
+class ApiKeySaveBody(BaseModel):
+    provider_id: str  # cubence | rightcodes
+    api_key: str
+    base_url: str | None = None
+
+
+class ModelSaveBody(BaseModel):
+    id: str
+    provider_id: str
+    display_name: str
+    description: str | None = None
+    is_active: bool = True
+    is_default: bool = False
+    sort_order: int = 0
+    capabilities: dict | None = None
+
+
+@app.get("/api/providers")
+async def api_list_providers(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT * FROM providers ORDER BY id")
+        # also attach apikey existence (masked)
+        settings_rows = await con.fetch("SELECT key, value FROM settings WHERE key LIKE '%_api_key' OR key LIKE '%_base_url'")
+        smap = {r["key"]: r["value"] for r in settings_rows}
+    out = []
+    for r in rows:
+        d = dict(r)
+        pid = d["id"]
+        # keys: {pid}_api_key  e.g. cubence_api_key, rightcodes_api_key
+        ak_key = f"{pid}_api_key"
+        bu_key = f"{pid}_base_url"
+        has_key = bool(smap.get(ak_key) or smap.get(f"cubence_api_key") if pid == "cubence" else smap.get(ak_key))
+        # mask
+        raw_key = smap.get(ak_key, "")
+        masked = (raw_key[:6] + "***" + raw_key[-4:]) if len(raw_key) > 10 else ("***" if raw_key else "")
+        out.append({**d, "has_api_key": bool(raw_key), "api_key_masked": masked, "api_key_setting_key": ak_key, "base_url_setting": smap.get(bu_key, d.get("base_url", ""))})
+    return out
+
+
+@app.post("/api/providers")
+async def api_save_provider(body: ProviderSaveBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute(
+            """
+            INSERT INTO providers (id, name, base_url, is_active, updated_at)
+            VALUES ($1,$2,$3,$4, now())
+            ON CONFLICT (id) DO UPDATE SET name=COALESCE(EXCLUDED.name, providers.name), base_url=$3, is_active=$4, updated_at=now()
+            """,
+            body.id, body.name or body.id, body.base_url, body.is_active,
+        )
+    return {"ok": True}
+
+
+@app.get("/api/models")
+async def api_list_models(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT m.*, p.name as provider_name, p.is_active as provider_active FROM ai_models m LEFT JOIN providers p ON p.id=m.provider_id ORDER BY p.id, m.sort_order, m.display_name"
+        )
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/models")
+async def api_save_model(body: ModelSaveBody, _: bool = Depends(require_auth)):
+    import json as _json
+    async with _pool.acquire() as con:
+        # validate provider exists
+        prov = await con.fetchrow("SELECT id FROM providers WHERE id=$1", body.provider_id)
+        if not prov:
+            raise HTTPException(status_code=400, detail=f"Provider {body.provider_id} tidak ditemukan")
+        if body.is_default:
+            await con.execute("UPDATE ai_models SET is_default=false WHERE provider_id=$1", body.provider_id)
+        await con.execute(
+            """
+            INSERT INTO ai_models (id, provider_id, display_name, description, is_active, is_default, sort_order, capabilities, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb, now())
+            ON CONFLICT (id) DO UPDATE SET provider_id=$2, display_name=$3, description=$4, is_active=$5, is_default=$6, sort_order=$7, capabilities=$8::jsonb, updated_at=now()
+            """,
+            body.id, body.provider_id, body.display_name, body.description, body.is_active, body.is_default, body.sort_order, _json.dumps(body.capabilities or {}),
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/models/{model_id}")
+async def api_delete_model(model_id: str, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute("DELETE FROM ai_models WHERE id=$1", model_id)
+    return {"ok": True}
+
+
+@app.post("/api/models/{model_id}/default")
+async def api_set_default_model(model_id: str, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT provider_id FROM ai_models WHERE id=$1", model_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+        pid = row["provider_id"]
+        await con.execute("UPDATE ai_models SET is_default=false WHERE provider_id=$1", pid)
+        await con.execute("UPDATE ai_models SET is_default=true WHERE id=$1", model_id)
+    return {"ok": True}
+
+
+@app.post("/api/models/{model_id}/toggle")
+async def api_toggle_model(model_id: str, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE ai_models SET is_active = NOT is_active WHERE id=$1", model_id)
+        row = await con.fetchrow("SELECT is_active FROM ai_models WHERE id=$1", model_id)
+    return {"ok": True, "is_active": row["is_active"] if row else False}
+
+
+@app.post("/api/providers/{provider_id}/toggle")
+async def api_toggle_provider(provider_id: str, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE providers SET is_active = NOT is_active, updated_at=now() WHERE id=$1", provider_id)
+        row = await con.fetchrow("SELECT is_active FROM providers WHERE id=$1", provider_id)
+    return {"ok": True, "is_active": row["is_active"] if row else False}
+
+
+@app.get("/api/apikeys")
+async def api_list_apikeys(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT key, value FROM settings WHERE key IN ('cubence_api_key','cubence_base_url','rightcodes_api_key','rightcodes_base_url')")
+    smap = {r["key"]: r["value"] for r in rows}
+    out = []
+    for pid in ["cubence", "rightcodes"]:
+        ak = smap.get(f"{pid}_api_key", "")
+        bu = smap.get(f"{pid}_base_url", "")
+        masked = (ak[:8] + "***" + ak[-6:]) if len(ak) > 16 else ("***" if ak else "")
+        out.append({"provider_id": pid, "has_key": bool(ak), "masked": masked, "base_url": bu, "api_key_length": len(ak)})
+    return out
+
+
+@app.post("/api/apikeys")
+async def api_save_apikey(body: ApiKeySaveBody, _: bool = Depends(require_auth)):
+    if body.provider_id not in ("cubence", "rightcodes"):
+        raise HTTPException(status_code=400, detail="provider_id must be cubence or rightcodes")
+    key_name = f"{body.provider_id}_api_key"
+    base_name = f"{body.provider_id}_base_url"
+    # save
+    if body.api_key and body.api_key != "***":
+        await set_setting(key_name, body.api_key.strip())
+    if body.base_url:
+        await set_setting(base_name, body.base_url.strip().rstrip("/"))
+    return {"ok": True}
+
+
+@app.post("/api/providers/{provider_id}/sync-models")
+async def api_sync_models(provider_id: str, _: bool = Depends(require_auth)):
+    if provider_id not in ("cubence", "rightcodes"):
+        raise HTTPException(status_code=400, detail="Unknown provider")
+    # resolve credentials from settings
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT value FROM settings WHERE key=$1", f"{provider_id}_api_key")
+        api_key = row["value"] if row else ""
+        row2 = await con.fetchrow("SELECT value FROM settings WHERE key=$1", f"{provider_id}_base_url")
+        base_url = row2["value"] if row2 and row2["value"] else ("https://api-dmit.cubence.com" if provider_id == "cubence" else "https://www.right.codes/draw")
+        if not api_key:
+            # fallback env for cubence
+            if provider_id == "cubence":
+                import os
+                api_key = os.environ.get("CUBENCE_API_KEY", "")
+            if not api_key:
+                raise HTTPException(status_code=400, detail=f"API key untuk {provider_id} belum di-set di admin")
+
+    # list remote
+    import httpx as _httpx
+
+    def _site_base(b: str) -> str:
+        bb = b.rstrip("/")
+        if bb.endswith("/draw"):
+            return bb[:-5]
+        if "/draw" in bb:
+            return bb.split("/draw")[0]
+        return bb
+
+    draw_base = base_url.rstrip("/")
+    if provider_id == "rightcodes" and not draw_base.endswith("/draw") and "/draw" not in draw_base:
+        draw_base = draw_base + "/draw"
+    site_base = _site_base(draw_base)
+
+    candidates = []
+    if provider_id == "cubence":
+        candidates = [f"{base_url.rstrip('/')}/v1/models"]
+    else:
+        candidates = [
+            f"{draw_base}/v1/models",
+            f"{site_base}/v1/models",
+        ]
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    remote_models: list[dict] = []
+    last_err = ""
+    async with _httpx.AsyncClient(timeout=15.0) as client:
+        for url in candidates:
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    j = resp.json()
+                    if isinstance(j, dict) and "data" in j and isinstance(j["data"], list):
+                        remote_models = j["data"]
+                        break
+                    elif isinstance(j, list):
+                        remote_models = j
+                        break
+                    else:
+                        remote_models = [j]
+                        break
+                last_err = f"{url} {resp.status_code} {resp.text[:200]}"
+            except Exception as e:
+                last_err = f"{url} {e}"
+                continue
+
+    if not remote_models:
+        raise HTTPException(status_code=400, detail=f"Gagal sync models: {last_err or 'no models returned'}")
+
+    # upsert into DB as inactive by default except existing active stay active
+    synced = 0
+    async with _pool.acquire() as con:
+        for m in remote_models:
+            mid = m.get("id") or m.get("model") or m.get("name")
+            if not mid:
+                continue
+            # skip non-image models for rightcodes? keep all but filter heuristics: if openai text models, maybe skip? We'll keep all that contain image/banana/draw/gpt-image/flux/sd etc or keep all if cubence
+            # For rightcodes, we want to include all models that provider returns — they are mostly image models.
+            # Optional filter: allow all
+            existing = await con.fetchrow("SELECT id, is_active, is_default FROM ai_models WHERE id=$1", mid)
+            is_active = existing["is_active"] if existing else False  # new models inactive by default so admin can enable
+            is_default = existing["is_default"] if existing else False
+            display = m.get("display_name") or m.get("id") or mid
+            desc = m.get("description") or m.get("owned_by") or ""
+            # keep original id as display if needed
+            await con.execute(
+                """
+                INSERT INTO ai_models (id, provider_id, display_name, description, is_active, is_default, sort_order, capabilities, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,0,'{}'::jsonb, now())
+                ON CONFLICT (id) DO UPDATE SET provider_id=$2, display_name=COALESCE(EXCLUDED.display_name, ai_models.display_name), description=COALESCE(EXCLUDED.description, ai_models.description), updated_at=now()
+                """,
+                mid, provider_id, display, desc, is_active, is_default,
+            )
+            synced += 1
+
+    return {"ok": True, "synced": synced, "models": [m.get("id") for m in remote_models[:100]]}
+
+
 # ---------------- User detail ----------------
-@app.get("/api/users/{uid}")
 async def user_detail(uid: int, _: bool = Depends(require_auth)):
     async with _pool.acquire() as con:
         u = await con.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)

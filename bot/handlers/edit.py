@@ -1,8 +1,7 @@
-"""Image-to-image / edit: photo + prompt, plus result actions callbacks."""
+"""Image-to-image / edit: photo + prompt, plus result actions callbacks. Uses providers."""
 import io
 import db
 import ui
-import cubence
 import styles as style_presets
 from i18n import t
 from tgutil import ProgressAnimator, safe_edit
@@ -65,6 +64,11 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
     except Exception:
         wm_on, wm_text = False, ""
 
+    try:
+        active_model = await db.get_active_model_for_user(message.from_user.id)
+    except Exception:
+        active_model = None
+
     status = await message.answer(t("editing", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
     animator = ProgressAnimator(message.bot, message.chat.id, status, t("editing", lang, used=used, limit=limit))
     animator.start()
@@ -72,13 +76,18 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
         buf = io.BytesIO()
         await message.bot.download(file_id, destination=buf)
         image_bytes = buf.getvalue()
-        img = await cubence.edit_image(image_bytes, styled_prompt, size=size)
+
+        from providers import edit_image as provider_edit
+        img = await provider_edit(active_model, image_bytes, styled_prompt, size=size, user_id=message.from_user.id)
+
         if wm_on and wm_text:
             try:
                 img = apply_watermark_image(img, wm_text)
             except Exception:
                 pass
         cap = t("edit_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
+        if active_model:
+            cap += f"\nModel: {active_model.get('display_name') or active_model.get('id')}"
         if wm_on and wm_text:
             cap += f"\n\n{wm_text}"
         sent = await message.answer_photo(BufferedInputFile(img, filename="edited.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
@@ -87,17 +96,23 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
         except Exception:
             result_file_id = None
         gen_id = await db.log_generation(message.from_user.id, "edit", prompt, size, True, result_file_id=result_file_id, style_id=style_id if style_id != "none" else None)
+        if gen_id and active_model:
+            try:
+                async with db._pool.acquire() as con:
+                    await con.execute("UPDATE generations SET model_id=$2 WHERE id=$1", gen_id, active_model["id"])
+            except Exception:
+                pass
         if result_file_id and gen_id:
             try:
                 await sent.edit_caption(caption=cap, reply_markup=ui.result_menu(lang, gen_id=gen_id, file_id=result_file_id))
             except Exception:
                 pass
-    except cubence.CubenceError as e:
-        await db.log_generation(message.from_user.id, "edit", prompt, size, False, style_id=style_id if style_id != "none" else None)
-        await message.answer(t("edit_failed", lang, err=e), reply_markup=ui.back_menu(lang))
     except Exception as e:
-        await db.log_generation(message.from_user.id, "edit", prompt, size, False, style_id=style_id if style_id != "none" else None)
-        await message.answer(t("edit_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
+        try:
+            await db.log_generation(message.from_user.id, "edit", prompt, size, False, style_id=style_id if style_id != "none" else None)
+        except Exception:
+            pass
+        await message.answer(t("edit_failed", lang, err=str(e)[:500]), reply_markup=ui.back_menu(lang))
     finally:
         if (await db.get_setting("feat_queue_enabled", "1")) == "1":
             await QUEUE.release(message.from_user.id)

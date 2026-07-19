@@ -1,4 +1,4 @@
-"""Batch generate handler — premium x4."""
+"""Batch generate handler — premium x4. Uses providers router."""
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.filters import Command
@@ -7,7 +7,6 @@ import asyncio
 
 import db
 import ui
-import cubence
 import styles as style_presets
 import feature_flags as ff
 from i18n import t
@@ -62,10 +61,17 @@ async def _do_batch(message: Message, prompt: str, count: int):
         wm_on, wm_text = False, ""
 
     try:
+        active_model = await db.get_active_model_for_user(message.from_user.id)
+    except Exception:
+        active_model = None
+
+    try:
+        from providers import generate_image as provider_generate
+
         async def one(idx):
             try:
                 var_prompt = base_prompt if idx == 0 else f"{base_prompt}, variation {idx+1}"
-                b = await cubence.generate_image(var_prompt, size=size)
+                b = await provider_generate(active_model, var_prompt, size=size, user_id=message.from_user.id)
                 if wm_on and wm_text:
                     try:
                         b = apply_watermark_image(b, wm_text)
@@ -81,6 +87,8 @@ async def _do_batch(message: Message, prompt: str, count: int):
         for img_bytes, err in results:
             if img_bytes:
                 caption = t("batch_done_item", lang, prompt=prompt[:100], idx=success+1, total=count, size=size)
+                if active_model:
+                    caption += f"\nModel: {active_model.get('display_name') or active_model.get('id')}"
                 if wm_on and wm_text:
                     caption += f"\n\n{wm_text}"
                 try:
@@ -93,7 +101,13 @@ async def _do_batch(message: Message, prompt: str, count: int):
                         fid = sent.photo[-1].file_id
                     except Exception:
                         fid = None
-                    await db.log_generation(message.from_user.id, "generate", prompt, size, True, result_file_id=fid, style_id=style_id_raw if style_id_raw != "none" else None)
+                    gid = await db.log_generation(message.from_user.id, "generate", prompt, size, True, result_file_id=fid, style_id=style_id_raw if style_id_raw != "none" else None)
+                    if gid and active_model:
+                        try:
+                            async with db._pool.acquire() as con:
+                                await con.execute("UPDATE generations SET model_id=$2 WHERE id=$1", gid, active_model["id"])
+                        except Exception:
+                            pass
                     success += 1
                 except Exception:
                     await db.log_generation(message.from_user.id, "generate", prompt, size, False)
