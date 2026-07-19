@@ -9,16 +9,14 @@ def short_code(provider_id: str) -> str:
     return SHORT_CODE.get(provider_id, provider_id[:2].upper())
 
 def format_model_label(provider_id: str, external_id: str, display_name: str | None = None) -> str:
-    """Format as CB/model or RC/model — never leak full provider name."""
+    """Format as CB/gpt-image-2 — always use external_id to avoid duplicate display like CB/GPT Image 2 double."""
     code = short_code(provider_id)
-    real = external_id or ""
-    # user wants RC/Gpt-image-2 style
-    if display_name and display_name != external_id:
-        # prefer display_name if not same as external? But still with code prefix to distinguish duplicates
-        # Use code/display_name for clarity
-        return f"{code}/{display_name}"
+    real = (external_id or display_name or "").strip()
+    # normalize to lower for consistent display, keep original case if needed but lower looks cleaner
+    # Keep external_id as primary to avoid GPT Image 2 vs gpt-image-2 duplicate perception
+    real = real.split(":")[-1]  # strip provider prefix if any
     return f"{code}/{real}" if real else code
 
 def format_model_short(provider_id: str, external_id: str) -> str:
     """Shortest privacy version: RC/xxx"""
-    return f"{short_code(provider_id)}/{external_id}"
+    return f"{short_code(provider_id)}/{external_id.split(':')[-1]}"

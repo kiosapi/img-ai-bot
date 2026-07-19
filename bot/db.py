@@ -1041,7 +1041,6 @@ async def upsert_provider(provider_id: str, name: str, base_url: str, is_active:
 async def list_models(active_only: bool = False, include_inactive_provider: bool = False) -> list[dict]:
     async with _pool.acquire() as con:
         if active_only:
-            # only models active AND provider active (user-facing)
             q = """
                 SELECT m.*, p.is_active as provider_active FROM ai_models m
                 JOIN providers p ON p.id = m.provider_id
@@ -1050,12 +1049,23 @@ async def list_models(active_only: bool = False, include_inactive_provider: bool
             """
             rows = await con.fetch(q)
         else:
-            # admin: all
             if include_inactive_provider:
                 rows = await con.fetch("SELECT m.*, p.is_active as provider_active, p.name as provider_name FROM ai_models m JOIN providers p ON p.id=m.provider_id ORDER BY p.id, m.sort_order, m.display_name")
             else:
                 rows = await con.fetch("SELECT m.*, p.is_active as provider_active, p.name as provider_name FROM ai_models m LEFT JOIN providers p ON p.id=m.provider_id ORDER BY m.sort_order, m.id")
-        return [dict(r) for r in rows]
+        raw = [dict(r) for r in rows]
+        if active_only:
+            # dedupe by id (collision-safe id is provider:external, so no true dupes, but also guard by external lower per provider)
+            seen = set()
+            out = []
+            for r in raw:
+                key = r["id"]  # already provider:external
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(r)
+            return out
+        return raw
 
 
 async def get_model(model_id: str) -> dict | None:
