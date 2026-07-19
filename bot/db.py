@@ -265,11 +265,11 @@ async def _create_schema():
             ON CONFLICT (id) DO NOTHING;
             """
         )
-        # default model for cubence
+        # default model for cubence — use composite id production-safe
         await con.execute(
             """
-            INSERT INTO ai_models (id, provider_id, display_name, description, is_active, is_default, sort_order, capabilities)
-            VALUES ('gpt-image-2', 'cubence', 'GPT Image 2', 'High quality general purpose', true, true, 0, '{\"txt2img\": true, \"img2img\": true, \"sizes\": [\"1024x1024\", \"1024x1536\", \"1536x1024\"]}'::jsonb)
+            INSERT INTO ai_models (id, provider_id, external_id, display_name, description, is_active, is_default, sort_order, capabilities)
+            VALUES ('cubence:gpt-image-2', 'cubence', 'gpt-image-2', 'gpt-image-2', 'High quality general purpose', true, true, 0, '{"txt2img": true, "img2img": true, "sizes": ["1024x1024", "1024x1536", "1536x1024"]}'::jsonb)
             ON CONFLICT (id) DO NOTHING;
             """
         )
