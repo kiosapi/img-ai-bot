@@ -24,18 +24,14 @@ async def _size_of(user_id: int) -> str:
 
 
 async def check_and_consume(user_id: int) -> tuple[bool, int, int]:
-    """Returns (allowed, used_after, limit). Does NOT consume if not allowed. limit 0 = unlimited.
-    If the daily limit is exhausted, falls back to consuming referral bonus quota
-    (bonus images earned by inviting friends) before finally refusing.
+    """Atomic quota check. Returns (allowed, used_after, limit). limit 0 = unlimited.
+    Uses db.try_consume_daily_quota (advisory lock) to prevent race.
+    Falls back to referral bonus quota if daily exhausted.
     """
-    limit = await db.effective_daily_limit(user_id, DEFAULT_DAILY_LIMIT)
-    used = await db.get_today_count(user_id)
-    if limit != 0 and used >= limit:
-        if await db.consume_bonus_quota(user_id, 1):
-            return True, used, limit  # used stays at the daily cap; bonus image granted separately
-        return False, used, limit
-    new_count = await db.increment_usage(user_id)
-    return True, new_count, limit
+    from config import DEFAULT_DAILY_LIMIT as _fallback
+    allowed, used, limit, _bonus = await db.check_and_consume_atomic(user_id, _fallback)
+    # For callers that only need 3-tuple, discard bonus flag
+    return allowed, used, limit
 
 
 # ---------------- Size selection ----------------

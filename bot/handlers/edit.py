@@ -5,6 +5,7 @@ supported. Editing itself is shared between them via _do_edit().
 """
 import io
 from aiogram import Router, F
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, BufferedInputFile
 
@@ -17,6 +18,11 @@ from tgutil import ProgressAnimator
 from states import EditStates
 
 router = Router()
+
+
+async def _has_pending_deposit_awaiting_proof(user_id: int) -> bool:
+    dep = await db.get_pending_deposit(user_id)
+    return bool(dep and not dep["proof_file_id"])
 
 
 async def _do_edit(message: Message, file_id: str, prompt: str):
@@ -67,6 +73,14 @@ async def handle_photo(message: Message, state: FSMContext):
     lang = await db.get_lang(message.from_user.id)
     prompt = (message.caption or "").strip()
     file_id = message.photo[-1].file_id  # highest resolution
+
+    # Guard: if user has a pending deposit awaiting proof AND is not in edit FSM,
+    # let the deposit handler (StateFilter(None)) handle it instead.
+    # If they ARE in edit FSM (clicked Edit Photo), edit takes priority.
+    fsm_state = await state.get_state()
+    if fsm_state is None and await _has_pending_deposit_awaiting_proof(message.from_user.id):
+        # Don't consume — return without handling so balance router can pick it up
+        return
 
     if not prompt:
         # No caption yet -> store file_id in FSM data and ask for instruction.

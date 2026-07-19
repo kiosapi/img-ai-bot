@@ -1,8 +1,10 @@
 """JSON API for the admin dashboard (FastAPI). Consumed by the Next.js frontend."""
+import asyncio
 import os
 import secrets
 import asyncpg
 import httpx
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from pydantic import BaseModel
 
@@ -15,28 +17,39 @@ REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "")
 SESSION_SECRET = os.environ.get("DASH_SECRET", secrets.token_hex(16))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
-app = FastAPI(title="ImageBot Admin API")
 _pool: asyncpg.Pool | None = None
 
-# simple in-memory token store (single admin). token -> True
-_tokens: set[str] = set()
+# ---- DB-backed session table ----
 
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global _pool
     _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-
-
-@app.on_event("shutdown")
-async def shutdown():
+    async with _pool.acquire() as con:
+        await con.execute(
+            "CREATE TABLE IF NOT EXISTS admin_sessions ("
+            " token TEXT PRIMARY KEY,"
+            " created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+            " expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '7 days')"
+        )
+        # cleanup expired sessions on startup
+        await con.execute("DELETE FROM admin_sessions WHERE expires_at < now()")
+    yield
     if _pool:
         await _pool.close()
 
 
-def require_auth(request: Request):
+app = FastAPI(title="ImageBot Admin API", lifespan=lifespan)
+
+
+async def require_auth(request: Request):
     token = request.cookies.get("session")
-    if not token or token not in _tokens:
+    if not token:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "SELECT 1 FROM admin_sessions WHERE token=$1 AND expires_at > now()", token)
+    if not row:
         raise HTTPException(status_code=401, detail="unauthorized")
     return True
 
@@ -68,7 +81,9 @@ async def login(body: LoginBody, response: Response):
     if not ok:
         raise HTTPException(status_code=401, detail="Username atau password salah")
     token = secrets.token_urlsafe(32)
-    _tokens.add(token)
+    async with _pool.acquire() as con:
+        await con.execute(
+            "INSERT INTO admin_sessions (token, expires_at) VALUES ($1, now() + interval '7 days')", token)
     response.set_cookie("session", token, httponly=True, samesite="lax", max_age=86400*7)
     return {"ok": True}
 
@@ -76,7 +91,9 @@ async def login(body: LoginBody, response: Response):
 @app.post("/api/logout")
 async def logout(request: Request, response: Response):
     token = request.cookies.get("session")
-    _tokens.discard(token)
+    if token:
+        async with _pool.acquire() as con:
+            await con.execute("DELETE FROM admin_sessions WHERE token=$1", token)
     response.delete_cookie("session")
     return {"ok": True}
 
@@ -273,19 +290,35 @@ async def broadcast(body: BroadcastBody, _: bool = Depends(require_auth)):
     has_image = bool(body.image_file_id)
     async with _pool.acquire() as con:
         rows = await con.fetch("SELECT user_id FROM users " + _audience_where(audience))
-    sent = 0
-    async with httpx.AsyncClient(timeout=30) as client:
-        for r in rows:
+    if not rows:
+        async with _pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO broadcast_history "
+                "(message, audience, sent, total, image_file_id, button_text, button_url) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                body.message, audience, 0, 0,
+                body.image_file_id, body.button_text, body.button_url)
+        return {"ok": True, "sent": 0, "total": 0}
+
+    # Parallel send with semaphore (respect Telegram rate limits ~30 msg/sec).
+    # Use asyncio with concurrency cap to avoid hammering Telegram / exhausting sockets.
+    sem = asyncio.Semaphore(20)
+    sent_counter = 0
+    lock = asyncio.Lock()
+
+    async def _send_one(client: httpx.AsyncClient, uid: int):
+        nonlocal sent_counter
+        async with sem:
             try:
                 if has_image:
                     payload = {
-                        "chat_id": r["user_id"], "photo": body.image_file_id,
+                        "chat_id": uid, "photo": body.image_file_id,
                         "caption": text, "parse_mode": "HTML",
                     }
                     method = "sendPhoto"
                 else:
                     payload = {
-                        "chat_id": r["user_id"], "text": text, "parse_mode": "HTML",
+                        "chat_id": uid, "text": text, "parse_mode": "HTML",
                     }
                     method = "sendMessage"
                 if reply_markup:
@@ -293,9 +326,23 @@ async def broadcast(body: BroadcastBody, _: bool = Depends(require_auth)):
                 resp = await client.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=payload)
                 if resp.status_code == 200 and resp.json().get("ok"):
-                    sent += 1
+                    async with lock:
+                        sent_counter += 1
+                elif resp.status_code == 429:
+                    # Telegram rate limit — backoff
+                    try:
+                        retry_after = resp.json().get("parameters", {}).get("retry_after", 1)
+                    except Exception:
+                        retry_after = 1
+                    await asyncio.sleep(float(retry_after))
             except Exception:
                 pass
+
+    async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=30)) as client:
+        tasks = [_send_one(client, r["user_id"]) for r in rows]
+        await asyncio.gather(*tasks)
+
+    sent = sent_counter
     async with _pool.acquire() as con:
         await con.execute(
             "INSERT INTO broadcast_history "
@@ -787,15 +834,18 @@ async def adjust_user_balance(body: BalanceAdjustBody, _: bool = Depends(require
     if body.delta == 0:
         raise HTTPException(status_code=400, detail="Nilai penyesuaian tidak boleh 0")
     async with _pool.acquire() as con:
+        # Check before transaction to avoid partial rollback confusion
+        row = await con.fetchrow(
+            "SELECT balance FROM users WHERE user_id=$1", body.user_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="User tidak ditemukan")
+        if row["balance"] + body.delta < 0:
+            raise HTTPException(status_code=400, detail="Saldo tidak boleh negatif")
         async with con.transaction():
-            row = await con.fetchrow(
+            new_row = await con.fetchrow(
                 "UPDATE users SET balance = balance + $2 WHERE user_id=$1 RETURNING balance",
                 body.user_id, body.delta)
-            if not row:
-                raise HTTPException(status_code=404, detail="User tidak ditemukan")
-            new_balance = row["balance"]
-            if new_balance < 0:
-                raise HTTPException(status_code=400, detail="Saldo tidak boleh negatif")
+            new_balance = new_row["balance"]
             await con.execute(
                 "INSERT INTO balance_logs (user_id, delta, balance_after, reason) VALUES ($1,$2,$3,$4)",
                 body.user_id, body.delta, new_balance, body.reason)

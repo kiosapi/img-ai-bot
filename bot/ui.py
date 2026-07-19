@@ -184,7 +184,7 @@ def premium_activated(plan_name: str, until, limit: int, balance: int, lang: str
 
 
 def order_rejected(note: str | None, lang: str = "id") -> str:
-    base = t("deposit_rejected", lang) if False else (
+    base = t("order_rejected", lang) if t("order_rejected", lang) != "order_rejected" else (
         "❌ <b>Pembayaran ditolak</b>\n\nMaaf, pembayaranmu tidak dapat diverifikasi." if lang == "id"
         else "❌ <b>Payment rejected</b>\n\nSorry, your payment could not be verified.")
     if note:

@@ -156,7 +156,9 @@ async def _create_schema():
 
 # ---------- users ----------
 async def upsert_user(user_id: int, username: str | None, first_name: str | None, lang_code: str | None = None):
-    """lang_code: Telegram's raw language_code (e.g. 'id', 'en-US'); only used to seed lang on first sight."""
+    """lang_code: Telegram's raw language_code (e.g. 'id', 'en-US'); only used to seed lang on first sight.
+    Preserves user-chosen lang on conflict — only fills lang if NULL (COALESCE).
+    """
     lang = "id" if (lang_code or "").lower().startswith("id") else "en"
     async with _pool.acquire() as con:
         await con.execute(
@@ -166,7 +168,8 @@ async def upsert_user(user_id: int, username: str | None, first_name: str | None
             ON CONFLICT (user_id) DO UPDATE
               SET username = EXCLUDED.username,
                   first_name = EXCLUDED.first_name,
-                  last_seen = now();
+                  last_seen = now(),
+                  lang = COALESCE(users.lang, EXCLUDED.lang);
             """,
             user_id, username, first_name, lang,
         )
@@ -317,6 +320,60 @@ async def increment_usage(user_id: int) -> int:
             user_id, date.today(),
         )
         return row["count"]
+
+
+async def try_consume_daily_quota(user_id: int, limit: int) -> tuple[bool, int]:
+    """Atomically try to consume 1 daily quota.
+    Returns (allowed, count_after_or_current). limit 0 = unlimited always allowed.
+    Uses pg_advisory_xact_lock per user to prevent race on concurrent requests.
+    """
+    async with _pool.acquire() as con:
+        async with con.transaction():
+            # Serialize concurrent quota checks for the same user
+            await con.execute("SELECT pg_advisory_xact_lock($1)", user_id)
+            tday = date.today()
+            # Ensure row exists so FOR UPDATE always locks something
+            await con.execute(
+                "INSERT INTO usage_daily (user_id, day, count) VALUES ($1,$2,0) "
+                "ON CONFLICT (user_id, day) DO NOTHING",
+                user_id, tday,
+            )
+            row = await con.fetchrow(
+                "SELECT count FROM usage_daily WHERE user_id=$1 AND day=$2 FOR UPDATE",
+                user_id, tday,
+            )
+            current = row["count"] if row else 0
+            if limit != 0 and current >= limit:
+                return False, current
+            new_row = await con.fetchrow(
+                "UPDATE usage_daily SET count = count + 1 "
+                "WHERE user_id=$1 AND day=$2 RETURNING count",
+                user_id, tday,
+            )
+            return True, new_row["count"]
+
+
+async def check_and_consume_atomic(user_id: int, free_fallback: int) -> tuple[bool, int, int, bool]:
+    """Atomic wrapper combining limit resolution + bonus fallback.
+    Returns (allowed, used, limit, used_bonus_quota).
+    """
+    # Resolve effective limit (premium-aware)
+    # NOTE: effective_daily_limit does its own pool acquire; that's okay
+    # because the critical atomic section is inside try_consume_daily_quota
+    # which uses advisory lock.
+    limit = await effective_daily_limit(user_id, free_fallback)
+    if limit != 0:
+        allowed, count = await try_consume_daily_quota(user_id, limit)
+        if allowed:
+            return True, count, limit, False
+        # daily exhausted -> try bonus quota
+        if await consume_bonus_quota(user_id, 1):
+            return True, count, limit, True
+        return False, count, limit, False
+    else:
+        # unlimited plan
+        n = await increment_usage(user_id)
+        return True, n, limit, False
 
 
 async def log_generation(user_id, kind, prompt, size, success):

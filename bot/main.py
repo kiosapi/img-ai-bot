@@ -47,11 +47,13 @@ async def main():
 
     # start router first (handles /start, callbacks) — subscription mw lets
     # the check_sub callback through because is_subscribed re-checks live.
+    # NOTE: edit before balance — edit's FSM photo handler must win over
+    # balance's pending-deposit photo handler when user is mid-edit.
     dp.include_router(start.router)
     dp.include_router(generate.router)
+    dp.include_router(edit.router)
     dp.include_router(premium.router)
     dp.include_router(balance.router)
-    dp.include_router(edit.router)
 
     logging.info("Bot starting (polling)...")
     try:

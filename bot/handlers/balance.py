@@ -2,6 +2,7 @@
 Admin approves/rejects the deposit from the dashboard; approval credits the balance.
 """
 from aiogram import Router, F, Bot
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
@@ -141,7 +142,7 @@ async def _awaiting_deposit_proof(message: Message) -> bool:
     return bool(dep and not dep["proof_file_id"])
 
 
-@router.message(F.photo, _awaiting_deposit_proof)
+@router.message(StateFilter(None), F.photo, _awaiting_deposit_proof)
 async def receive_deposit_proof(message: Message, bot: Bot):
     lang = await db.get_lang(message.from_user.id)
     dep = await db.get_pending_deposit(message.from_user.id)

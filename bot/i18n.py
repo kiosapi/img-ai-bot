@@ -96,6 +96,8 @@ TEXTS: dict[str, dict[str, str]] = {
         "already_joined": "✅ Sudah Join",
         "join_success": "✅ <b>Berhasil!</b> Kamu sudah join. Selamat berkreasi 🎨",
         "join_not_detected": "Belum terdeteksi join {channel}. Coba lagi.",
+        "join_required": "🔒 Untuk memakai bot ini, kamu harus join channel kami dulu.\n\nJoin {channel} lalu tekan <b>Sudah Join</b>.",
+        "join_not_joined": "Kamu belum join channel.",
 
         # ---- premium ----
         "upgrade_no_plans": "💎 <b>Upgrade Premium</b>\n\nMaaf, saat ini belum ada paket yang tersedia. Coba lagi nanti ya 🙏",
@@ -169,6 +171,7 @@ TEXTS: dict[str, dict[str, str]] = {
             "Terima kasih! 🙏"
         ),
         "deposit_rejected": "❌ <b>Deposit ditolak</b>\n\nMaaf, top up tidak dapat diverifikasi.",
+        "order_rejected": "❌ <b>Pembayaran ditolak</b>\n\nMaaf, pembayaranmu tidak dapat diverifikasi.",
         "deposit_history_empty": "🧾 <b>Riwayat Deposit</b>\n\nBelum ada riwayat deposit.",
         "deposit_history_item": "{icon} #{id} — {amount} — {status}",
         "status_pending": "menunggu",
@@ -298,6 +301,8 @@ TEXTS: dict[str, dict[str, str]] = {
         "already_joined": "✅ Already Joined",
         "join_success": "✅ <b>Success!</b> You've joined. Happy creating 🎨",
         "join_not_detected": "Couldn't detect you joining {channel}. Try again.",
+        "join_required": "🔒 To use this bot, you must join our channel first.\n\nJoin {channel} then tap <b>Already Joined</b>.",
+        "join_not_joined": "You haven't joined the channel yet.",
 
         "upgrade_no_plans": "💎 <b>Upgrade Premium</b>\n\nSorry, no plans are available right now. Please check back later 🙏",
         "upgrade_intro": "💎 <b>Upgrade to Premium</b>\n\nGet <b>more daily quota</b>!\nPay instantly with <b>Balance</b> 👇",
@@ -369,6 +374,7 @@ TEXTS: dict[str, dict[str, str]] = {
             "Thank you! 🙏"
         ),
         "deposit_rejected": "❌ <b>Deposit rejected</b>\n\nSorry, we couldn't verify your top-up.",
+        "order_rejected": "❌ <b>Payment rejected</b>\n\nSorry, your payment could not be verified.",
         "deposit_history_empty": "🧾 <b>Deposit History</b>\n\nNo deposit history yet.",
         "deposit_history_item": "{icon} #{id} — {amount} — {status}",
         "status_pending": "pending",

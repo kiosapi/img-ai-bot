@@ -5,15 +5,16 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
 from config import REQUIRED_CHANNEL, ADMIN_IDS
+from i18n import t
 
 _ALLOWED_STATUSES = {"member", "administrator", "creator"}
 
 
-def _join_keyboard():
+def _join_keyboard(lang: str = "id"):
     kb = InlineKeyboardBuilder()
     ch = REQUIRED_CHANNEL.lstrip("@")
-    kb.button(text="📢 Join Channel", url=f"https://t.me/{ch}")
-    kb.button(text="✅ Sudah Join", callback_data="check_sub")
+    kb.button(text=t("join_channel", lang), url=f"https://t.me/{ch}")
+    kb.button(text=t("already_joined", lang), callback_data="check_sub")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -84,13 +85,11 @@ class SubscriptionMiddleware(BaseMiddleware):
                 await _notify_referrer(bot, reward, user)
             return await handler(event, data)
 
-        text = (
-            "🔒 Untuk memakai bot ini, kamu harus join channel kami dulu.\n\n"
-            f"Join {REQUIRED_CHANNEL} lalu tekan <b>Sudah Join</b>."
-        )
+        lang = await db.get_lang(user.id)
+        text = t("join_required", lang, channel=REQUIRED_CHANNEL)
         if isinstance(event, CallbackQuery):
-            await event.answer("Kamu belum join channel.", show_alert=True)
-            await event.message.answer(text, reply_markup=_join_keyboard())
+            await event.answer(t("join_not_joined", lang), show_alert=True)
+            await event.message.answer(text, reply_markup=_join_keyboard(lang))
         elif isinstance(event, Message):
-            await event.answer(text, reply_markup=_join_keyboard())
+            await event.answer(text, reply_markup=_join_keyboard(lang))
         return  # stop processing
