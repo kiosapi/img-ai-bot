@@ -1,4 +1,4 @@
-"""Model picker — user selects image model. Privacy: never show provider name."""
+"""Model picker — user selects image model. Privacy: never show provider name, use short code RC/ CB."""
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -7,6 +7,14 @@ from i18n import t
 import ui
 
 router = Router()
+
+
+def _short_label(m: dict) -> str:
+    try:
+        from model_display import format_model_label
+        return format_model_label(m.get("provider_id",""), m.get("external_id") or m.get("id",""), m.get("display_name"))
+    except Exception:
+        return m.get("display_name") or m.get("external_id") or m.get("id","")
 
 
 @router.message(Command("model"))
@@ -26,16 +34,17 @@ async def cmd_model(message: Message):
         await message.answer(t("model_no_models", lang), reply_markup=ui.back_menu(lang))
         return
 
-    # current pref
     try:
         cur = await db.get_active_model_for_user(message.from_user.id)
         cur_id = cur["id"] if cur else None
+        cur_label = _short_label(cur) if cur else None
     except Exception:
         cur_id = None
+        cur_label = None
 
     text = t("model_pick", lang) if t("model_pick", lang) != "model_pick" else "Pilih model gambar:"
-    if cur_id:
-        text += f"\nSaat ini: <b>{cur_id}</b>"
+    if cur_label:
+        text += f"\nSaat ini: {cur_label}"
 
     await message.answer(text, reply_markup=ui.model_menu(models, cur_id, lang))
 
@@ -44,18 +53,17 @@ async def cmd_model(message: Message):
 async def cb_set_model(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
     try:
+        # model:provider:external -> need keep everything after first colon
         model_id = callback.data.split(":", 1)[1]
     except Exception:
         await callback.answer(t("invalid_data", lang), show_alert=True)
         return
 
-    # validate active
     try:
         m = await db.get_model(model_id)
         if not m or not m.get("is_active"):
             await callback.answer(t("invalid_data", lang), show_alert=True)
             return
-        # also check provider active
         prov = await db.get_provider(m["provider_id"])
         if not prov or not prov.get("is_active"):
             await callback.answer(t("model_inactive", lang) if t("model_inactive", lang) != "model_inactive" else "Model tidak aktif", show_alert=True)
@@ -69,21 +77,25 @@ async def cb_set_model(callback: CallbackQuery):
         await callback.answer(f"Gagal: {e}", show_alert=True)
         return
 
-    await callback.answer(t("model_set", lang, model=model_id) if "model_set" in t.__code__.co_varnames or True else f"Model {model_id} selected")
+    # display short code
     try:
-        model_obj = await db.get_model(model_id)
-        label = model_obj.get("display_name") if model_obj else model_id
+        mobj = await db.get_model(model_id)
+        label = _short_label(mobj) if mobj else model_id
+    except Exception:
+        label = model_id
+
+    await callback.answer(t("model_set", lang, model=label) if "model" in t("model_set", lang, model=label) or True else f"Model {label} selected")
+    try:
         await callback.message.edit_text(
-            f"Model dipilih: <b>{label}</b>\n\nSekarang kirim prompt untuk generate.",
+            f"Model dipilih: {label}\n\nSekarang kirim prompt untuk generate.",
             reply_markup=ui.back_menu(lang)
         )
     except Exception:
-        await callback.message.answer(f"Model dipilih: {model_id}", reply_markup=ui.back_menu(lang))
+        await callback.message.answer(f"Model dipilih: {label}", reply_markup=ui.back_menu(lang))
 
 
 @router.callback_query(F.data == "menu:model")
 async def cb_menu_model(callback: CallbackQuery):
-    # reuse cmd_model logic but via callback
     lang = await db.get_lang(callback.from_user.id)
     if (await db.get_setting("feat_model_enabled", "1")) == "0":
         await callback.answer(t("feature_disabled", lang), show_alert=True)
@@ -98,11 +110,13 @@ async def cb_menu_model(callback: CallbackQuery):
     try:
         cur = await db.get_active_model_for_user(callback.from_user.id)
         cur_id = cur["id"] if cur else None
+        cur_label = _short_label(cur) if cur else None
     except Exception:
         cur_id = None
+        cur_label = None
     text = "Pilih model gambar:" if lang == "id" else "Pick image model:"
-    if cur_id:
-        text += f"\nCurrent: <b>{cur_id}</b>"
+    if cur_label:
+        text += f"\nCurrent: {cur_label}"
     from tgutil import safe_edit
     await safe_edit(callback.message, text, reply_markup=ui.model_menu(models, cur_id, lang))
     await callback.answer()

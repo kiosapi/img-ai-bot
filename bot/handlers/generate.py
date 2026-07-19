@@ -125,14 +125,17 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
             except Exception:
                 pass
 
-        # display current model name without provider
+        # display current model name — privacy short code RC/ CB only
         model_label = ""
         if active_model:
-            model_label = active_model.get("display_name") or active_model.get("id") or ""
+            try:
+                from model_display import format_model_label
+                model_label = format_model_label(active_model.get("provider_id",""), active_model.get("external_id") or active_model.get("id",""), active_model.get("display_name"))
+            except Exception:
+                model_label = active_model.get("display_name") or active_model.get("external_id") or ""
 
         caption_base = t("gen_done", lang, prompt=final_prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
         if model_label:
-            # append model info if setting enabled? keep subtle, no provider leak
             caption_base += f"\nModel: {model_label}"
         if wm_on and wm_text:
             caption_base += f"\n\n{wm_text}"

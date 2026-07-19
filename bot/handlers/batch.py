@@ -88,7 +88,12 @@ async def _do_batch(message: Message, prompt: str, count: int):
             if img_bytes:
                 caption = t("batch_done_item", lang, prompt=prompt[:100], idx=success+1, total=count, size=size)
                 if active_model:
-                    caption += f"\nModel: {active_model.get('display_name') or active_model.get('id')}"
+                    try:
+                        from model_display import format_model_label
+                        _ml = format_model_label(active_model.get("provider_id",""), active_model.get("external_id") or active_model.get("id",""), active_model.get("display_name"))
+                    except Exception:
+                        _ml = active_model.get("display_name") or active_model.get("external_id") or ""
+                    caption += f"\nModel: {_ml}"
                 if wm_on and wm_text:
                     caption += f"\n\n{wm_text}"
                 try:

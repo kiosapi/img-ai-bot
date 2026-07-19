@@ -352,9 +352,13 @@ def model_menu(models: list[dict], current_id: str | None, lang: str = "id"):
     kb = InlineKeyboardBuilder()
     for m in models:
         mid = m.get("id") or m.get("model_id") or ""
-        display = m.get("display_name") or mid
-        # mark current with text prefix, no emoji
-        prefix = "[active] " if mid == current_id else ""
+        # short code label RC/ CB privacy
+        try:
+            from model_display import format_model_label
+            display = format_model_label(m.get("provider_id",""), m.get("external_id") or mid, m.get("display_name"))
+        except Exception:
+            display = m.get("display_name") or m.get("external_id") or mid
+        prefix = "[x] " if mid == current_id else ""
         label = f"{prefix}{display}"
         if len(label) > 44:
             label = label[:41] + "..."

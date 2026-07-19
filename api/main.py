@@ -188,15 +188,26 @@ async def list_users(q: str = "", _: bool = Depends(require_auth)):
         if q:
             like = f"%{q}%"
             rows = await con.fetch(
-                "SELECT u.user_id,u.username,u.first_name,u.is_banned,u.created_at,u.balance,u.lang,"
-                "count(g.id) AS gen_count FROM users u LEFT JOIN generations g ON g.user_id=u.user_id "
-                "WHERE u.username ILIKE $1 OR u.first_name ILIKE $1 OR CAST(u.user_id AS TEXT) LIKE $1 "
-                "GROUP BY u.user_id ORDER BY gen_count DESC LIMIT 200", like)
+                """
+                SELECT u.user_id, u.username, u.first_name, u.is_banned, u.created_at, u.balance, u.lang,
+                       (SELECT count(*) FROM generations g WHERE g.user_id = u.user_id) AS gen_count
+                FROM users u
+                WHERE u.username ILIKE $1 OR u.first_name ILIKE $1 OR CAST(u.user_id AS TEXT) LIKE $1
+                ORDER BY gen_count DESC, u.created_at DESC
+                LIMIT 200
+                """,
+                like,
+            )
         else:
             rows = await con.fetch(
-                "SELECT u.user_id,u.username,u.first_name,u.is_banned,u.created_at,u.balance,u.lang,"
-                "count(g.id) AS gen_count FROM users u LEFT JOIN generations g ON g.user_id=u.user_id "
-                "GROUP BY u.user_id ORDER BY gen_count DESC LIMIT 200")
+                """
+                SELECT u.user_id, u.username, u.first_name, u.is_banned, u.created_at, u.balance, u.lang,
+                       (SELECT count(*) FROM generations g WHERE g.user_id = u.user_id) AS gen_count
+                FROM users u
+                ORDER BY gen_count DESC, u.created_at DESC
+                LIMIT 200
+                """
+            )
     return [dict(r) for r in rows]
 
 
@@ -744,18 +755,24 @@ async def api_sync_models(provider_id: str, _: bool = Depends(require_auth)):
 
 
 # ---------------- User detail ----------------
-async def user_detail(uid: int, _: bool = Depends(require_auth)):
+@app.get("/api/users/{uid}")
+async def user_detail(uid: str, _: bool = Depends(require_auth)):
+    # uid may come as string from frontend — parse bigint safely
+    try:
+        uid_int = int(str(uid).strip())
+    except Exception:
+        raise HTTPException(status_code=400, detail="User ID tidak valid")
     async with _pool.acquire() as con:
-        u = await con.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
+        u = await con.fetchrow("SELECT * FROM users WHERE user_id=$1", uid_int)
         if not u:
-            raise HTTPException(status_code=404, detail="User tidak ditemukan")
-        total = await con.fetchval("SELECT count(*) FROM generations WHERE user_id=$1", uid) or 0
-        ok = await con.fetchval("SELECT count(*) FROM generations WHERE user_id=$1 AND success", uid) or 0
+            raise HTTPException(status_code=404, detail=f"User {uid_int} tidak ditemukan di database ({await con.fetchval('SELECT count(*) FROM users') or 0} total users)")
+        total = await con.fetchval("SELECT count(*) FROM generations WHERE user_id=$1", uid_int) or 0
+        ok = await con.fetchval("SELECT count(*) FROM generations WHERE user_id=$1 AND success", uid_int) or 0
         today = await con.fetchval(
-            "SELECT count(*) FROM generations WHERE user_id=$1 AND created_at::date=CURRENT_DATE", uid) or 0
+            "SELECT count(*) FROM generations WHERE user_id=$1 AND created_at::date=CURRENT_DATE", uid_int) or 0
         gens = await con.fetch(
             "SELECT kind,prompt,size,success,created_at FROM generations "
-            "WHERE user_id=$1 ORDER BY id DESC LIMIT 50", uid)
+            f"WHERE user_id=$1 ORDER BY id DESC LIMIT 50", uid_int)
     return {
         "user": dict(u), "total": total, "success": ok, "failed": total - ok, "today": today,
         "generations": [dict(g) for g in gens],

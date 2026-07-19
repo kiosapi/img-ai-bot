@@ -87,7 +87,12 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
                 pass
         cap = t("edit_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
         if active_model:
-            cap += f"\nModel: {active_model.get('display_name') or active_model.get('id')}"
+            try:
+                from model_display import format_model_label
+                _ml = format_model_label(active_model.get("provider_id",""), active_model.get("external_id") or active_model.get("id",""), active_model.get("display_name"))
+            except Exception:
+                _ml = active_model.get("display_name") or active_model.get("external_id") or ""
+            cap += f"\nModel: {_ml}"
         if wm_on and wm_text:
             cap += f"\n\n{wm_text}"
         sent = await message.answer_photo(BufferedInputFile(img, filename="edited.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
