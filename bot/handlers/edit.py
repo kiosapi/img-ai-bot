@@ -19,7 +19,7 @@ from i18n import t
 from handlers.generate import check_and_consume, _size_of, is_maintenance, _style_of
 from tgutil import ProgressAnimator, safe_edit
 from states import EditStates
-from queue import QUEUE
+from gen_queue import QUEUE
 
 router = Router()
 

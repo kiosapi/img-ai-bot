@@ -12,7 +12,7 @@ from i18n import t
 from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE
 from tgutil import safe_edit, ProgressAnimator
 from states import GenerateStates
-from queue import QUEUE
+from gen_queue import QUEUE
 
 router = Router()
 
