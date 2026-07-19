@@ -41,19 +41,6 @@ async def check_and_consume(user_id: int) -> tuple[bool, int, int]:
     return allowed, used, limit
 
 
-async def _should_watermark(user_id: int) -> tuple[bool, str]:
-    enabled = await ff.watermark_enabled()
-    if not enabled:
-        return False, ""
-    wa_text = await ff.watermark_text()
-    free_only = await ff.watermark_free_only()
-    if free_only:
-        is_prem = await db.is_premium(user_id)
-        if is_prem:
-            return False, ""
-    return True, wa_text
-
-
 @router.message(Command("size"))
 async def cmd_size(message: Message):
     lang = await db.get_lang(message.from_user.id)
@@ -73,25 +60,28 @@ async def set_size(callback: CallbackQuery):
 
 async def _do_generate(message: Message, prompt: str, variation: bool = False, force_size: str | None = None, enhance: bool = False):
     lang = await db.get_lang(message.from_user.id)
-    if not await QUEUE.acquire(message.from_user.id):
-        await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
-        return
+    # queue gate
+    if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+        if not await QUEUE.acquire(message.from_user.id):
+            await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
+            return
 
     if await is_maintenance():
-        await QUEUE.release(message.from_user.id)
+        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+            await QUEUE.release(message.from_user.id)
         await message.answer(t("maintenance", lang))
         return
 
     allowed, used, limit = await check_and_consume(message.from_user.id)
     if not allowed:
-        await QUEUE.release(message.from_user.id)
+        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+            await QUEUE.release(message.from_user.id)
         await message.answer(
             t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)),
             reply_markup=ui.back_menu(lang))
         return
 
     size = force_size or await _size_of(message.from_user.id)
-    # enhance
     final_prompt = prompt
     if enhance:
         if not await ff.enhance_enabled():
@@ -111,13 +101,25 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
         var_hints = ["different angle", "different lighting", "slightly different composition", "alternative perspective", "with slight variation"]
         styled_prompt = f"{styled_prompt}, {random.choice(var_hints)}"
 
-    wm_on, wm_text = await _should_watermark(message.from_user.id)
+    # watermark check (do after consume to not waste quota if disabled? we already consumed, so keep simple)
+    try:
+        from watermark import should_watermark, apply_watermark_image
+        wm_on, wm_text = await should_watermark(message.from_user.id)
+    except Exception:
+        wm_on, wm_text = False, ""
 
     status = await message.answer(t("generating", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
     animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used, limit=limit))
     animator.start()
     try:
         img = await cubence.generate_image(styled_prompt, size=size)
+        # apply image watermark if enabled
+        if wm_on and wm_text:
+            try:
+                img = apply_watermark_image(img, wm_text)
+            except Exception:
+                pass
+
         caption_base = t("gen_done", lang, prompt=final_prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
         if wm_on and wm_text:
             caption_base += f"\n\n{wm_text}"
@@ -149,7 +151,8 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
         await db.log_generation(message.from_user.id, "generate", final_prompt, size, False, style_id=style_id if style_id != "none" else None)
         await message.answer(t("gen_failed", lang, err=f"Unexpected error: {e}"), reply_markup=ui.back_menu(lang))
     finally:
-        await QUEUE.release(message.from_user.id)
+        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+            await QUEUE.release(message.from_user.id)
         await animator.stop()
         try:
             await status.delete()
@@ -163,7 +166,6 @@ async def cmd_generate(message: Message):
     if not prompt:
         await message.answer(ui.prompt_ask(await db.get_lang(message.from_user.id)))
         return
-    # check if enhance flag /gen then prompt contains --enhance? simple heuristic: if starts with ✨
     enhance = False
     if prompt.startswith("✨ "):
         enhance = True
@@ -179,9 +181,6 @@ async def cmd_enhance(message: Message):
         return
     prompt = message.text.partition(" ")[2].strip()
     if not prompt:
-        # ask input with enhance flag
-        from aiogram.fsm.context import FSMContext
-        # cannot inject state here via signature, fallback ask
         await message.answer(t("enhance_doing", lang) + "\n\n" + ui.prompt_ask(lang))
         return
     await _do_generate(message, prompt, enhance=True)
@@ -202,11 +201,10 @@ async def cb_enhance(callback: CallbackQuery):
     if not gen or not gen.get("prompt"):
         await callback.answer(t("invalid_data", lang), show_alert=True)
         return
-    await callback.answer("✨ Enhancing...")
+    await callback.answer("Enhancing...")
     await _do_generate(callback.message, gen["prompt"], enhance=True)
 
 
-# Reply while in the "type a prompt" state
 @router.message(GenerateStates.waiting_prompt, F.text, ~F.text.startswith("/"))
 async def fsm_prompt(message: Message, state: FSMContext):
     data = await state.get_data()

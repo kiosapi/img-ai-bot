@@ -4,13 +4,11 @@ import db
 import ui
 import cubence
 import styles as style_presets
-import feature_flags as ff
 from i18n import t
 from tgutil import ProgressAnimator, safe_edit
 from states import EditStates
 from gen_queue import QUEUE
 from aiogram import Router, F
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
@@ -30,19 +28,6 @@ async def _style_of(uid: int):
     return await db.get_pref_style(uid, "none") or "none"
 
 
-async def _should_watermark(uid: int):
-    enabled = await ff.watermark_enabled()
-    if not enabled:
-        return False, ""
-    wa_text = await ff.watermark_text()
-    free_only = await ff.watermark_free_only()
-    if free_only:
-        is_prem = await db.is_premium(uid)
-        if is_prem:
-            return False, ""
-    return True, wa_text
-
-
 async def _has_pending_deposit_awaiting_proof(user_id: int) -> bool:
     dep = await db.get_pending_deposit(user_id)
     return bool(dep and not dep["proof_file_id"])
@@ -60,18 +45,25 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
             await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
             return
     if await is_maintenance():
-        await QUEUE.release(message.from_user.id)
+        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+            await QUEUE.release(message.from_user.id)
         await message.answer(t("maintenance", lang))
         return
     allowed, used, limit, _bonus = await _check_and_consume(message.from_user.id)
     if not allowed:
-        await QUEUE.release(message.from_user.id)
+        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+            await QUEUE.release(message.from_user.id)
         await message.answer(t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)), reply_markup=ui.back_menu(lang))
         return
     size = force_size or await _size_of(message.from_user.id)
     style_id = await _style_of(message.from_user.id)
     styled_prompt = style_presets.apply_style(prompt, style_id)
-    wm_on, wm_text = await _should_watermark(message.from_user.id)
+
+    try:
+        from watermark import should_watermark, apply_watermark_image
+        wm_on, wm_text = await should_watermark(message.from_user.id)
+    except Exception:
+        wm_on, wm_text = False, ""
 
     status = await message.answer(t("editing", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
     animator = ProgressAnimator(message.bot, message.chat.id, status, t("editing", lang, used=used, limit=limit))
@@ -81,6 +73,11 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
         await message.bot.download(file_id, destination=buf)
         image_bytes = buf.getvalue()
         img = await cubence.edit_image(image_bytes, styled_prompt, size=size)
+        if wm_on and wm_text:
+            try:
+                img = apply_watermark_image(img, wm_text)
+            except Exception:
+                pass
         cap = t("edit_done", lang, prompt=prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
         if wm_on and wm_text:
             cap += f"\n\n{wm_text}"
@@ -112,7 +109,6 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
 
 
 async def _do_generate_from_edit(msg: Message, prompt: str, variation=False, force_size: str | None = None):
-    # avoid circular import — import here
     from handlers.generate import _do_generate
     await _do_generate(msg, prompt, variation=variation, force_size=force_size)
 
@@ -181,7 +177,7 @@ async def cb_variation(callback: CallbackQuery):
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt"):
         await callback.answer(t("invalid_data", lang), show_alert=True); return
-    await callback.answer("✨ Variation")
+    await callback.answer("Variation")
     await _do_generate_from_edit(callback.message, gen["prompt"], variation=True)
 
 
@@ -194,7 +190,7 @@ async def cb_hd(callback: CallbackQuery):
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt"):
         await callback.answer(t("invalid_data", lang), show_alert=True); return
-    await callback.answer("🔍 HD")
+    await callback.answer("HD")
     await _do_generate_from_edit(callback.message, gen["prompt"], force_size="1536x1024")
 
 

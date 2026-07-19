@@ -10,7 +10,7 @@ from aiogram.types import BotCommand
 
 import db
 import config
-from middlewares.subscription import SubscriptionMiddleware
+from middlewares.subscription import SubscriptionMiddleware, MaintenanceMiddleware
 from handlers import start, generate, edit, premium, balance, style, myworks, checkin, inline, batch, sticker
 
 logging.basicConfig(level=logging.INFO)
@@ -55,9 +55,12 @@ async def main():
     storage = _get_storage()
     dp = Dispatcher(storage=storage)
 
-    # Subscription gate applies to messages and callbacks
+    # Subscription gate + maintenance applies to messages and callbacks
+    maint_mw = MaintenanceMiddleware()
     sub_mw = SubscriptionMiddleware()
+    dp.message.middleware(maint_mw)
     dp.message.middleware(sub_mw)
+    dp.callback_query.middleware(maint_mw)
     dp.callback_query.middleware(sub_mw)
 
     dp.include_router(start.router)

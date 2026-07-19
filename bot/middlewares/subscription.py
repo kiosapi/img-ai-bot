@@ -1,4 +1,4 @@
-"""Middleware: enforce channel subscription before allowing bot usage."""
+"""Middleware: maintenance mode + channel subscription gate."""
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -26,12 +26,10 @@ async def is_subscribed(bot, user_id: int) -> bool:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return member.status in _ALLOWED_STATUSES
     except Exception:
-        # If bot can't check (not admin / channel issue), fail open=False
         return False
 
 
 async def _notify_referrer(bot, reward: dict, referred_user):
-    """Best-effort DM to the referrer telling them their bonus just landed."""
     try:
         lang = await db.get_lang(reward["referrer_id"])
         name = f"@{referred_user.username}" if referred_user.username else (referred_user.first_name or "Seseorang")
@@ -49,7 +47,39 @@ async def _notify_referrer(bot, reward: dict, referred_user):
         )
         await bot.send_message(reward["referrer_id"], text)
     except Exception:
-        pass  # never let a notification failure break the subscription flow
+        pass
+
+
+class MaintenanceMiddleware(BaseMiddleware):
+    """Global maintenance gate — blocks all user messages except admins."""
+
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = data.get("event_from_user")
+        if user is None:
+            return await handler(event, data)
+        # admins bypass
+        if user.id in ADMIN_IDS:
+            return await handler(event, data)
+        try:
+            maint = await db.get_setting("maintenance", "0")
+            if maint == "1":
+                lang = await db.get_lang(user.id)
+                if isinstance(event, CallbackQuery):
+                    try:
+                        await event.answer(t("maintenance", lang), show_alert=True)
+                    except Exception:
+                        pass
+                    return
+                elif isinstance(event, Message):
+                    try:
+                        await event.answer(t("maintenance", lang))
+                    except Exception:
+                        pass
+                    return
+        except Exception:
+            # fail open if DB error
+            pass
+        return await handler(event, data)
 
 
 class SubscriptionMiddleware(BaseMiddleware):
@@ -59,11 +89,6 @@ class SubscriptionMiddleware(BaseMiddleware):
         if user is None:
             return await handler(event, data)
 
-        # Register/refresh the user and capture any referral deep-link
-        # (/start ref_<referrer_id>) BEFORE the subscription gate — this
-        # middleware runs ahead of every router, so a brand-new user who
-        # hasn't joined the channel yet would otherwise never reach
-        # cmd_start and their referral would be lost.
         is_new = not await db.user_exists(user.id)
         await db.upsert_user(user.id, user.username, user.first_name, user.language_code)
 
@@ -77,9 +102,6 @@ class SubscriptionMiddleware(BaseMiddleware):
                     pass
 
         if await is_subscribed(bot, user.id):
-            # Reward the referrer as soon as the referred user clears the
-            # subscription gate for the first time (per user's decision:
-            # bonus is granted on join-channel, not on raw /start).
             reward = await db.try_reward_referral(user.id)
             if reward:
                 await _notify_referrer(bot, reward, user)
@@ -92,4 +114,4 @@ class SubscriptionMiddleware(BaseMiddleware):
             await event.message.answer(text, reply_markup=_join_keyboard(lang))
         elif isinstance(event, Message):
             await event.answer(text, reply_markup=_join_keyboard(lang))
-        return  # stop processing
+        return
