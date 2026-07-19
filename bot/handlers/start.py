@@ -65,18 +65,6 @@ async def cmd_balance(message: Message):
     await message.answer(ui.balance_text(balance, lang), reply_markup=ui.balance_menu(lang))
 
 
-@router.message(Command("myworks"))
-async def cmd_myworks_redirect(message: Message):
-    # redirect to myworks handler's logic via callback? Simpler call db directly
-    lang = await _lang(message.from_user.id)
-    total = await db.count_user_generations(message.from_user.id)
-    if total == 0:
-        await message.answer(t("myworks_empty", lang), reply_markup=ui.back_menu(lang))
-        return
-    gens = await db.get_user_generations(message.from_user.id, limit=5, offset=0)
-    await message.answer(t("myworks_title", lang, total=total, shown=len(gens)), reply_markup=ui.myworks_menu(gens, total, 0, 5, lang))
-
-
 @router.message(Command("lang"))
 async def cmd_lang(message: Message):
     lang = await _lang(message.from_user.id)
