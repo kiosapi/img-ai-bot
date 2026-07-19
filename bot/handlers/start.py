@@ -113,6 +113,9 @@ async def nav_size(callback: CallbackQuery):
 async def nav_gen(callback: CallbackQuery, state: FSMContext):
     lang = await _lang(callback.from_user.id)
     await state.set_state(GenerateStates.waiting_prompt)
+    # No ForceReply: the reply bar is what sticks on the client and re-shows
+    # when the user closes & reopens the app. The FSM state alone is enough —
+    # the very next text message from this user gets routed to fsm_prompt.
     await callback.message.answer(ui.prompt_ask(lang))
     await callback.answer()
 
@@ -121,6 +124,7 @@ async def nav_gen(callback: CallbackQuery, state: FSMContext):
 async def nav_edit(callback: CallbackQuery, state: FSMContext):
     lang = await _lang(callback.from_user.id)
     await state.set_state(EditStates.waiting_instruction)
+    # No ForceReply (see nav_gen for why).
     await callback.message.answer(ui.edit_ask(lang))
     await callback.answer()
 
