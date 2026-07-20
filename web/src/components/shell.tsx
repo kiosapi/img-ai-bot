@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
-import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X, Wallet, ArrowDownToLine, Gift, Bot } from "lucide-react";
+import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X, Wallet, ArrowDownToLine, Gift, Bot, ShieldCheck } from "lucide-react";
 import { cn, api } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useLang, FlagID, FlagEN } from "@/lib/i18n";
@@ -20,6 +20,7 @@ const groups = [
       { href: "/models", labelKey: "nav.models", icon: Bot },
       { href: "/errors", labelKey: "nav.errors", icon: AlertTriangle },
       { href: "/settings", labelKey: "nav.settings", icon: Settings },
+      { href: "/audit", labelKey: "nav.audit", icon: ShieldCheck },
     ],
   },
   {

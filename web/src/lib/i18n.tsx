@@ -15,6 +15,7 @@ const TRANSLATIONS: Dict = {
   "nav.models": { id: "Models & Provider", en: "Models & Provider" },
   "nav.errors": { id: "Error", en: "Errors" },
   "nav.settings": { id: "Setting", en: "Settings" },
+  "nav.audit": { id: "Audit Log", en: "Audit Log" },
   "nav.premium": { id: "Premium", en: "Premium" },
   "nav.orders": { id: "Pesanan", en: "Orders" },
   "nav.plans": { id: "Paket", en: "Plans" },
