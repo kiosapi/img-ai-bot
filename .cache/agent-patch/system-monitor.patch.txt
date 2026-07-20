@@ -1,0 +1,45 @@
+### System Monitor Backend Patch – Phase1 Fit1 ###
+File: ~/imgbot/api/main.py
+
+Imports added:
+import platform, psutil, socket, datetime as _dt, from pathlib import Path
+
+New helpers:
+- _sync_psutil_snapshot(): blocking psutil calls isolated for executor
+  - cpu_percent(interval=0.3)
+  - cpu_percent(percpu=True)
+  - virtual_memory(), disk_usage("/"), getloadavg() fallback, boot_time(), uptime, net_io_counters, process count, self RSS
+- _get_system_metrics_nonblocking(): asyncio.get_running_loop().run_in_executor(None, _sync_psutil_snapshot)
+- _get_postgres_stats(): async via _pool
+  - SELECT pg_database_size(current_database())
+  - SELECT pg_size_pretty
+  - SELECT pg_class + pg_total_relation_size per table top20
+  - SELECT count(*) FROM key tables: users,generations,orders,deposits,plans,payment_methods,balance_logs,referrals,usage_daily,admin_sessions,broadcast_history,ai_models,providers
+  - SELECT count(*) FROM pg_stat_activity
+  - SHOW max_connections
+
+Endpoints (all require_auth):
+GET /api/system/metrics -> ok, ts, cpu_percent, cpu_per_core, cpu_count_logical/physical, memory{total,available,used,free,percent}, disk{...}, load_avg{1m,5m,15m}, boot_time, uptime_seconds, uptime_human, net_io, process_count, self_memory, platform{system,release,machine,hostname,python}
+
+GET /api/system/stats -> merges psutil + postgres
+  returns cpu_percent, cpu_per_core, cpu_count, memory, disk, load_avg, uptime_*, boot_time, platform, postgres{db_size_bytes, db_size_human, tables{...}, row_counts{users,generations,orders,deposits,...}, pg_stat_activity_count, pg_max_connections}
+
+GET /api/system/docker -> docker socket optional
+  - if /var/run/docker.sock exists: try docker ps --format json via subprocess in executor -> {ok,docker_available:true,containers[]}
+  - else fallback top 30 processes by mem via psutil in executor -> {docker_available:false, fallback:"processes", top_processes[]}
+
+Security:
+- No env leak (no DATABASE_URL, BOT_TOKEN, ADMIN_PASS echoed)
+- Uses parameterized or whitelisted table names only (literal list, no user input)
+- All psutil blocking isolated to thread executor to avoid event loop block
+- interval 0.3 for cpu_percent per spec
+
+Requirements:
+api/requirements.txt already has psutil==6.1.0 (checked)
+
+Frontend widget should poll /api/system/metrics or /api/system/stats every 10-15s.
+
+Merge notes:
+- This patch coexists with /api/logs/tail (another agent's concurrent work) – no conflict, endpoints in different sections.
+- py_compile OK verified.
+

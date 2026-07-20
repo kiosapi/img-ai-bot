@@ -345,7 +345,6 @@ const TRANSLATIONS: Dict = {
   // Live Logs
   "logs.title": { id: "Live Logs", en: "Live Logs" },
   "logs.sub": { id: "Tail log bot/api/postgres - docker logs atau fallback DB", en: "Tail bot/api/postgres logs - docker logs or DB fallback" },
-  "nav.logs": { id: "Live Logs", en: "Live Logs" },
 };
 
 function getSavedLang(): Lang {
