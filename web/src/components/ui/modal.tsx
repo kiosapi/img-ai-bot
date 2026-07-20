@@ -16,14 +16,16 @@ export function Modal({ open, onClose, title, children }: {
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative z-10 w-full sm:max-w-md max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl border bg-card p-5 shadow-2xl">
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-lg font-bold">{title}</h3>
+    <div className="fixed inset-0 z-[90] flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative z-[91] w-full sm:max-w-lg max-h-[90vh] sm:max-h-[92vh] flex flex-col rounded-t-2xl sm:rounded-2xl border bg-card shadow-2xl overflow-hidden">
+        <div className="flex shrink-0 items-center justify-between border-b px-5 py-4">
+          <h3 className="text-[15px] font-bold leading-none">{title}</h3>
           <button onClick={onClose} className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"><X className="h-5 w-5" /></button>
         </div>
-        {children}
+        <div className="flex-1 overflow-y-auto overscroll-contain p-5">
+          {children}
+        </div>
       </div>
     </div>
   );
@@ -32,7 +34,7 @@ export function Modal({ open, onClose, title, children }: {
 export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="mb-3 block">
-      <span className="mb-1.5 block text-sm font-medium">{label}</span>
+      <span className="mb-1.5 block text-[13px] font-semibold tracking-tight">{label}</span>
       {children}
     </label>
   );
@@ -110,7 +112,7 @@ export function Select({ value, onChange, children, className, placeholder = "Pi
         <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 max-h-56 overflow-auto rounded-md border bg-popover p-1 shadow-xl">
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[100] max-h-56 overflow-auto rounded-xl border bg-card p-1 shadow-[0_12px_40px_rgba(0,0,0,0.35)] backdrop-blur-none">
           {options.length === 0 ? (
             <div className="px-3 py-2 text-xs text-muted-foreground">Tidak ada opsi</div>
           ) : options.map(opt => {
@@ -121,8 +123,8 @@ export function Select({ value, onChange, children, className, placeholder = "Pi
                 type="button"
                 onClick={() => handleSelect(opt.value)}
                 className={cn(
-                  "flex w-full items-center justify-between rounded-sm px-2.5 py-2.5 text-sm text-left transition-colors",
-                  active ? "bg-primary text-primary-foreground" : "hover:bg-accent hover:text-accent-foreground"
+                  "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-[13px] text-left transition-colors",
+                  active ? "bg-primary text-primary-foreground font-semibold" : "hover:bg-muted hover:text-foreground text-foreground"
                 )}
               >
                 <span className="truncate">{opt.label}</span>
@@ -163,16 +165,16 @@ export function CustomSelect({ value, onChange, options, placeholder = "Pilih...
   return (
     <div ref={ref} className={cn("relative", className)}>
       <button type="button" disabled={disabled} onClick={() => !disabled && setOpen(o=>!o)}
-        className="flex h-10 w-full items-center justify-between rounded-md border bg-card px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring hover:border-foreground/20 disabled:opacity-50">
-        <span className={cn("truncate", !selected && "text-muted-foreground")}>{selected ? selected.label : placeholder}</span>
-        <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", open && "rotate-180")} />
+        className="flex h-10 w-full items-center justify-between rounded-xl border bg-card px-3 py-2 text-[13px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring hover:border-foreground/20 disabled:opacity-50 shadow-sm">
+        <span className={cn("truncate text-left", !selected && "text-muted-foreground font-normal")}>{selected ? selected.label : placeholder}</span>
+        <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="absolute z-50 mt-1.5 w-full rounded-md border bg-popover p-1 shadow-xl max-h-56 overflow-auto">
+        <div className="absolute z-[100] mt-2 w-full rounded-xl border bg-card p-1 shadow-[0_12px_40px_rgba(0,0,0,0.35)] max-h-56 overflow-auto">
           {options.map(o => (
             <button key={o.value} type="button" onClick={()=>{setOpen(false); onChange(o.value);}}
-              className={cn("flex w-full items-center justify-between rounded-sm px-3 py-2.5 text-sm text-left hover:bg-accent", o.value===value && "bg-primary text-primary-foreground")}>
-              <span>{o.label}</span>{o.value===value && <Check className="h-4 w-4" />}
+              className={cn("flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-[13px] text-left transition-colors", o.value===value ? "bg-primary text-primary-foreground font-semibold" : "hover:bg-muted text-foreground")}>
+              <span className="truncate">{o.label}</span>{o.value===value && <Check className="h-4 w-4 shrink-0" />}
             </button>
           ))}
         </div>

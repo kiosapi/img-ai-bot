@@ -4,6 +4,7 @@ import { ScrollText, Bot, Server, Database, Globe, Copy, Pause, Play, Trash2, Se
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { CustomSelect } from "@/components/ui/modal";
 import { useLang } from "@/lib/i18n";
 
 type LogType = "bot" | "api" | "postgres" | "web";
@@ -95,7 +96,7 @@ export default function LogsPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2 overflow-x-auto">
             <div className="flex items-center gap-1 rounded-full border bg-muted/30 p-0.5 shrink-0">{LEVEL_OPTS.map(o => { const active = level === o.id; return (<button key={o.id} onClick={() => setLevel(o.id as LogLevel)} className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] sm:text-xs font-medium transition shrink-0 ${active ? "bg-card shadow border text-foreground" : "text-muted-foreground hover:text-foreground"}`}><o.icon className={`h-3 w-3 ${active ? (o.id === "error" ? "text-red-500" : o.id === "warn" ? "text-amber-500" : "") : ""}`} />{o.label}</button>); })}</div>
-            <select value={lines} onChange={e => setLines(Number(e.target.value))} className="h-7 sm:h-8 rounded-md border bg-background px-2 text-xs sm:text-sm shrink-0"><option value={100}>100 lines</option><option value={200}>200 lines</option><option value={300}>300 lines</option><option value={500}>500 lines</option></select>
+            <CustomSelect value={String(lines)} onChange={v=>setLines(Number(v))} options={[{value:"100",label:"100 lines"},{value:"200",label:"200 lines"},{value:"300",label:"300 lines"},{value:"500",label:"500 lines"}]} className="w-[110px] shrink-0" />
             <div className="relative flex-1 min-w-[140px] max-w-[220px]"><Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><input value={searchInput} onChange={e => setSearchInput(e.target.value)} placeholder={lang === "id" ? "Filter..." : "Filter..."} className="h-7 sm:h-8 w-full rounded-md border bg-background pl-7 pr-7 text-xs sm:text-sm outline-none focus:ring-1 focus:ring-ring" />{searchInput && <button onClick={() => setSearchInput("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><Trash2 className="h-3.5 w-3.5" /></button>}</div>
           </div>
         </CardHeader>

@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea, Badge } from "@/components/ui/controls";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { CustomSelect } from "@/components/ui/modal";
 import { useLang } from "@/lib/i18n";
 
 type DynamicText = {
@@ -165,11 +166,7 @@ export default function TextsPage() {
               <Input className="pl-9" placeholder={t("texts.search_ph") || "Cari key, value, description..."} value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
             <div className="flex items-center gap-2">
-              <select value={filterSet} onChange={(e) => setFilterSet(e.target.value as any)} className="h-9 rounded-md border bg-card px-3 text-sm">
-                <option value="all">{t("texts.filter_all") || "Semua"}</option>
-                <option value="set">{t("texts.filter_set") || "Sudah di-set"}</option>
-                <option value="empty">{t("texts.filter_empty") || "Masih default"}</option>
-              </select>
+              <CustomSelect value={filterSet} onChange={setFilterSet} options={[{value:"all",label:t("texts.filter_all")||"Semua"},{value:"set",label:t("texts.filter_set")||"Sudah di-set"},{value:"empty",label:t("texts.filter_empty")||"Masih default"}]} className="w-[150px]" />
               <Badge variant="muted">{filtered.length} / {texts.length}</Badge>
             </div>
           </div>
