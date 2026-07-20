@@ -22,7 +22,7 @@ export default function AuditPage() {
   useEffect(() => { load(); }, []);
 
   const actionBadge = (a: string) => {
-    if (a.includes("login")) return <Badge variant="outline">{a}</Badge>;
+    if (a.includes("login")) return <Badge variant="muted">{a}</Badge>;
     if (a.includes("ban") || a.includes("reject")) return <Badge variant="destructive">{a}</Badge>;
     if (a.includes("approve") || a.includes("balance")) return <Badge variant="muted">{a}</Badge>;
     if (a.includes("broadcast")) return <Badge variant="muted">{a}</Badge>;
