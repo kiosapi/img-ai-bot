@@ -29,12 +29,14 @@ const Textarea = React.forwardRef<HTMLTextAreaElement, React.TextareaHTMLAttribu
 );
 Textarea.displayName = "Textarea";
 
-function Badge({ className, variant = "default", ...props }: React.HTMLAttributes<HTMLSpanElement> & { variant?: "default" | "success" | "destructive" | "muted" }) {
+function Badge({ className, variant = "default", ...props }: React.HTMLAttributes<HTMLSpanElement> & { variant?: "default" | "success" | "destructive" | "muted" | "secondary" | "outline" }) {
   const variants = {
     default: "bg-primary/15 text-primary",
     success: "bg-success/15 text-success",
     destructive: "bg-destructive/15 text-destructive",
     muted: "bg-muted text-muted-foreground",
+    secondary: "bg-muted text-muted-foreground",
+    outline: "border bg-transparent text-foreground",
   };
   return <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold", variants[variant], className)} {...props} />;
 }
