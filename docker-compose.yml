@@ -33,7 +33,7 @@ services:
       REQUIRED_CHANNEL: ${REQUIRED_CHANNEL}
       ADMIN_IDS: ${ADMIN_IDS}
       DEFAULT_DAILY_LIMIT: ${DEFAULT_DAILY_LIMIT}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:***@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 
   api:
     build: ./api
@@ -42,7 +42,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:***@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       ADMIN_USER: ${ADMIN_USER}
       ADMIN_PASS: ${ADMIN_PASS}
       DASH_SECRET: ${DASH_SECRET}
