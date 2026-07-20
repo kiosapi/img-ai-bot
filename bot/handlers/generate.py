@@ -207,6 +207,39 @@ async def _do_generate(message: Message, prompt: str, variation: bool=False, for
 
     batch_id = str(uuid.uuid4()) if batch>1 else None
 
+        # --- moderation check (Phase3-7) ---
+    try:
+        import moderation as mod_checker
+        blocked, rule, severity, matched = await mod_checker.check_prompt(final_prompt)
+        sev_lower = (severity or "").lower() if severity else ""
+        if blocked and rule:
+            dyn_nsfw = await dyn_texts.get_dynamic_text_or_none("nsfw_msg")
+            dyn_banned = await dyn_texts.get_dynamic_text_or_none("banned_msg")
+            if dyn_nsfw and sev_lower in ("nsfw","block","high"):
+                msg_text = dyn_nsfw
+            elif dyn_banned:
+                msg_text = dyn_banned
+            else:
+                if lang == "id":
+                    msg_text = f"Blocked moderasi ({severity}). Deteksi: {(matched or '')[:80]}. Coba prompt aman."
+                else:
+                    msg_text = f"Blocked by moderation ({severity}). Detected: {(matched or '')[:80]}. Try safer."
+            try:
+                await mod_checker.log_block(message.from_user.id, final_prompt, rule, matched or "", severity or "block")
+            except Exception:
+                pass
+            await message.answer(msg_text, reply_markup=ui.back_menu(lang))
+            if (await db.get_setting("feat_queue_enabled","1"))=="1":
+                await QUEUE.release(message.from_user.id)
+            return
+        if rule and matched:
+            try:
+                await mod_checker.log_block(message.from_user.id, final_prompt, rule, matched or "", severity or "warn")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # ATOMIC reservation upfront
     ok_batch, used_batch, limit_batch = await check_and_consume_multi(message.from_user.id, batch)
     if not ok_batch:

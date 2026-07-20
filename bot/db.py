@@ -295,6 +295,24 @@ async def _create_schema():
             ON CONFLICT (id) DO NOTHING;
             """
         )
+        # ---- provider failover config (Phase3 task8) ----
+        await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS failover_priority INT NOT NULL DEFAULT 0;")
+        await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS timeout_sec INT NOT NULL DEFAULT 30;")
+        await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 2;")
+        await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS cost_per_gen NUMERIC NOT NULL DEFAULT 0;")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_providers_failover_priority ON providers(failover_priority, id);")
+        # backfill priority by creation order if all zero: keep current id order as priority
+        try:
+            zero_cnt = await con.fetchval("SELECT count(*) FROM providers WHERE failover_priority=0")
+            total = await con.fetchval("SELECT count(*) FROM providers")
+            if total and zero_cnt == total:
+                rows = await con.fetch("SELECT id FROM providers ORDER BY id")
+                for idx, r in enumerate(rows):
+                    await con.execute("UPDATE providers SET failover_priority=$1 WHERE id=$2", idx, r["id"])
+        except Exception:
+            pass
+        # ensure generations has model_id already for stats join (existing migration elsewhere does it)
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS model_id TEXT;")
         # ---- custom_styles: no-code style presets manager ----
         await con.execute(
             """
@@ -316,6 +334,44 @@ async def _create_schema():
         await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;")
         await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS sort_order INT NOT NULL DEFAULT 0;")
         await con.execute("CREATE INDEX IF NOT EXISTS idx_custom_styles_sort ON custom_styles(sort_order, id);")
+        # ---- alert_rules + alert_history (Phase3 task9) ----
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alert_rules (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL CHECK (type IN ('error_rate','deposit_pending','cpu_high','disk_high','queue_stuck','bot_offline')),
+                threshold NUMERIC NOT NULL DEFAULT 0,
+                channel TEXT NOT NULL DEFAULT 'webhook' CHECK (channel IN ('discord','telegram','webhook')),
+                target_url TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                cooldown_sec INT NOT NULL DEFAULT 900,
+                last_triggered_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alert_history (
+                id SERIAL PRIMARY KEY,
+                rule_id INT REFERENCES alert_rules(id) ON DELETE SET NULL,
+                type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                triggered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                resolved BOOLEAN NOT NULL DEFAULT false,
+                meta JSONB NOT NULL DEFAULT '{}'::jsonb
+            );
+            """
+        )
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_rules_type ON alert_rules(type);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_rules_active ON alert_rules(is_active);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_triggered ON alert_history(triggered_at DESC);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule_id);")
+        await con.execute("ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS last_triggered_at TIMESTAMPTZ;")
+        await con.execute("ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS cooldown_sec INT NOT NULL DEFAULT 900;")
+        await con.execute("ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS resolved BOOLEAN NOT NULL DEFAULT false;")
+        await con.execute("ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb;")
         # seed if empty from hardcoded styles.py
         try:
             cnt = await con.fetchval("SELECT count(*) FROM custom_styles")
@@ -1232,7 +1288,11 @@ async def increment_sticker_count(pack_name: str) -> int:
 # ---------- providers + models ----------
 async def list_providers() -> list[dict]:
     async with _pool.acquire() as con:
-        rows = await con.fetch("SELECT * FROM providers ORDER BY id")
+        # failover_priority ordering for bot (Phase3 task8)
+        try:
+            rows = await con.fetch("SELECT * FROM providers ORDER BY failover_priority ASC, id ASC")
+        except Exception:
+            rows = await con.fetch("SELECT * FROM providers ORDER BY id")
         return [dict(r) for r in rows]
 
 
@@ -1436,5 +1496,46 @@ async def apply_custom_style(prompt: str, style_code: str) -> str:
             return prompt
 
 
+# ---------- provider failover priority helpers (Phase3 task8) ----------
+async def list_providers_failover() -> list[dict]:
+    """Return providers ordered by failover_priority for bot consumption; tolerant to missing columns."""
+    try:
+        async with _pool.acquire() as con:
+            rows = await con.fetch(
+                "SELECT id, name, base_url, is_active, COALESCE(failover_priority,0) AS failover_priority, "
+                "COALESCE(timeout_sec,30) AS timeout_sec, COALESCE(retry_count,2) AS retry_count, "
+                "COALESCE(cost_per_gen,0) AS cost_per_gen FROM providers ORDER BY failover_priority ASC, id ASC"
+            )
+            return [dict(r) for r in rows]
+    except Exception:
+        return await list_providers()
 
+async def get_provider_failover_config(provider_id: str) -> dict | None:
+    try:
+        async with _pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT id, failover_priority, timeout_sec, retry_count, cost_per_gen, is_active "
+                "FROM providers WHERE id=$1", provider_id
+            )
+            return dict(row) if row else None
+    except Exception:
+        return await get_provider(provider_id)
 
+# ---------- moderation manager (Phase3-7) ----------
+async def get_moderation_rules(active_only: bool = True) -> list[dict]:
+    async with _pool.acquire() as con:
+        if active_only:
+            rows = await con.fetch("SELECT * FROM moderation_rules WHERE is_active=true ORDER BY id DESC")
+        else:
+            rows = await con.fetch("SELECT * FROM moderation_rules ORDER BY id DESC")
+        return [dict(r) for r in rows]
+
+async def log_moderation(user_id: int, prompt: str, matched_pattern: str, rule_id: int | None, action: str):
+    try:
+        async with _pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO moderation_logs (user_id, prompt, matched_pattern, rule_id, action) VALUES ($1,$2,$3,$4,$5)",
+                user_id, prompt[:1000], matched_pattern[:200], rule_id, action
+            )
+    except Exception:
+        pass

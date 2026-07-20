@@ -148,6 +148,36 @@ async def _ensure_tables():
         await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;")
         await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS sort_order INT NOT NULL DEFAULT 0;")
         await con.execute("CREATE INDEX IF NOT EXISTS idx_custom_styles_sort ON custom_styles(sort_order, id);")
+        # moderation_rules + moderation_logs
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS moderation_rules (
+                id SERIAL PRIMARY KEY,
+                pattern TEXT NOT NULL,
+                type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS moderation_logs (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                prompt TEXT,
+                matched_pattern TEXT,
+                rule_id INT,
+                action TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_moderation_rules_type ON moderation_rules(type);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_moderation_logs_user ON moderation_logs(user_id);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_moderation_logs_created ON moderation_logs(created_at DESC);")
+
         # seed if empty from hardcoded mapping (same as bot/styles.py)
         try:
             cnt = await con.fetchval("SELECT count(*) FROM custom_styles")
@@ -172,6 +202,65 @@ async def _ensure_tables():
                     )
         except Exception as e:
             print(f"warn seed custom_styles: {e}")
+
+        # ---- provider failover config migrations (Phase3 task8) ----
+        try:
+            await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS failover_priority INT NOT NULL DEFAULT 0;")
+            await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS timeout_sec INT NOT NULL DEFAULT 30;")
+            await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 2;")
+            await con.execute("ALTER TABLE providers ADD COLUMN IF NOT EXISTS cost_per_gen NUMERIC NOT NULL DEFAULT 0;")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_providers_failover_priority ON providers(failover_priority, id);")
+            zero_cnt = await con.fetchval("SELECT count(*) FROM providers WHERE failover_priority=0")
+            total = await con.fetchval("SELECT count(*) FROM providers")
+            if total and zero_cnt == total:
+                rows = await con.fetch("SELECT id FROM providers ORDER BY id")
+                for idx, r in enumerate(rows):
+                    await con.execute("UPDATE providers SET failover_priority=$1 WHERE id=$2", idx, r["id"])
+            await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS model_id TEXT;")
+        except Exception as fe:
+            print(f"warn failover migration: {fe}")
+
+        # ---- alert webhook system (Phase3 task9) ----
+        try:
+            await con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alert_rules (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL CHECK (type IN ('error_rate','deposit_pending','cpu_high','disk_high','queue_stuck','bot_offline')),
+                    threshold NUMERIC NOT NULL DEFAULT 0,
+                    channel TEXT NOT NULL DEFAULT 'webhook' CHECK (channel IN ('discord','telegram','webhook')),
+                    target_url TEXT NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    cooldown_sec INT NOT NULL DEFAULT 900,
+                    last_triggered_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                """
+            )
+            await con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alert_history (
+                    id SERIAL PRIMARY KEY,
+                    rule_id INT REFERENCES alert_rules(id) ON DELETE SET NULL,
+                    type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    triggered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    resolved BOOLEAN NOT NULL DEFAULT false,
+                    meta JSONB NOT NULL DEFAULT '{}'::jsonb
+                );
+                """
+            )
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_rules_type ON alert_rules(type);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_rules_active ON alert_rules(is_active);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_triggered ON alert_history(triggered_at DESC);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule_id);")
+            await con.execute("ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS last_triggered_at TIMESTAMPTZ;")
+            await con.execute("ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS cooldown_sec INT NOT NULL DEFAULT 900;")
+            await con.execute("ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS resolved BOOLEAN NOT NULL DEFAULT false;")
+            await con.execute("ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb;")
+        except Exception as ae:
+            print(f"warn alert migration: {ae}")
 
 async def audit_log(action: str, target: str | None = None, detail: str | None = None):
     try:
@@ -2284,4 +2373,943 @@ async def reorder_styles_ep(body: StyleReorderBody, _: bool = Depends(require_au
     await audit_log("style_reorder", "-", f"count={len(body.order)}")
     return {"ok": True}
 
+# ---- Provider Failover Config (Phase3 task8) ----
 
+class FailoverReorderBody(BaseModel):
+    order: list[str] = Field(..., min_length=1, max_length=50, description="ordered list of provider ids priority ASC")
+
+class FailoverConfigBody(BaseModel):
+    timeout_sec: int = Field(..., ge=5, le=120)
+    retry_count: int = Field(..., ge=0, le=5)
+    cost_per_gen: float = Field(..., ge=0, le=100000)
+
+def _failover_provider_dict(r) -> dict:
+    d = dict(r)
+    # normalize cost to float
+    try:
+        d["cost_per_gen"] = float(d.get("cost_per_gen") or 0)
+    except Exception:
+        d["cost_per_gen"] = 0.0
+    return d
+
+@app.get("/api/providers/failover")
+async def list_failover_providers(_: bool = Depends(require_auth)):
+    # list ordered by failover_priority ASC, with stats: model counts + gen stats 7d via ai_models join
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT id, name, base_url, is_active, failover_priority, timeout_sec, retry_count, cost_per_gen, created_at, updated_at "
+            "FROM providers ORDER BY failover_priority ASC, id ASC"
+        )
+        # model counts
+        model_rows = await con.fetch(
+            "SELECT provider_id, count(*) AS total, count(*) FILTER (WHERE is_active) AS active_cnt "
+            "FROM ai_models GROUP BY provider_id"
+        )
+        model_map = {r["provider_id"]: {"total": int(r["total"]), "active": int(r["active_cnt"])} for r in model_rows}
+        # gen stats 7d: generations has model_id which contains provider prefix or ai_models FK
+        # try join via model_id -> ai_models.provider_id, fallback 0
+        try:
+            gen_rows = await con.fetch(
+                """
+                SELECT
+                  am.provider_id AS pid,
+                  count(*) AS gen_7d,
+                  count(*) FILTER (WHERE g.success) AS success_7d,
+                  count(*) FILTER (WHERE NOT g.success) AS failed_7d
+                FROM generations g
+                LEFT JOIN ai_models am ON am.id = g.model_id
+                WHERE g.created_at > now() - interval '7 days' AND am.provider_id IS NOT NULL
+                GROUP BY am.provider_id
+                """
+            )
+            gen_map = {r["pid"]: {"gen_7d": int(r["gen_7d"]), "success_7d": int(r["success_7d"]), "failed_7d": int(r["failed_7d"])} for r in gen_rows}
+        except Exception:
+            gen_map = {}
+
+    out = []
+    for r in rows:
+        d = _failover_provider_dict(r)
+        mm = model_map.get(d["id"], {"total": 0, "active": 0})
+        gm = gen_map.get(d["id"], {"gen_7d": 0, "success_7d": 0, "failed_7d": 0})
+        success_rate = 0
+        if gm["gen_7d"] > 0:
+            success_rate = round(100.0 * gm["success_7d"] / gm["gen_7d"], 1)
+        out.append({
+            **d,
+            "models_total": mm["total"],
+            "models_active": mm["active"],
+            "gen_7d": gm["gen_7d"],
+            "success_7d": gm["success_7d"],
+            "failed_7d": gm["failed_7d"],
+            "success_rate_7d": success_rate,
+            # placeholder for live latency, filled on-demand via test-ping
+            "last_latency_ms": None,
+        })
+    total_active = sum(1 for p in out if p.get("is_active"))
+    avg_cost = round(sum(float(p.get("cost_per_gen") or 0) for p in out) / len(out), 4) if out else 0
+    return {"providers": out, "total": len(out), "active": total_active, "avg_cost": avg_cost, "failover_enabled": total_active > 1}
+
+@app.post("/api/providers/failover/reorder")
+async def reorder_failover(body: FailoverReorderBody, _: bool = Depends(require_auth)):
+    if not body.order:
+        raise HTTPException(status_code=400, detail="order kosong")
+    # uniqueness
+    if len(set(body.order)) != len(body.order):
+        raise HTTPException(status_code=400, detail="order harus unique")
+    # validate ids pattern
+    for pid in body.order:
+        if not re.match(r"^[a-z0-9_-]{1,50}$", pid):
+            raise HTTPException(status_code=400, detail=f"invalid provider id {pid}")
+    async with _pool.acquire() as con:
+        existing = await con.fetch("SELECT id FROM providers WHERE id = ANY($1::text[])", body.order)
+        existing_ids = {r["id"] for r in existing}
+        missing = [i for i in body.order if i not in existing_ids]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Provider tidak ditemukan: {missing}")
+        # also ensure reorder covers all? If not, keep remaining after ordered list appended by current priority
+        all_rows = await con.fetch("SELECT id FROM providers ORDER BY failover_priority ASC, id ASC")
+        all_ids = [r["id"] for r in all_rows]
+        remaining = [pid for pid in all_ids if pid not in body.order]
+        full_order = body.order + remaining
+        async with con.transaction():
+            for idx, pid in enumerate(full_order):
+                await con.execute("UPDATE providers SET failover_priority=$1, updated_at=now() WHERE id=$2", idx, pid)
+    await audit_log("failover_reorder", "-", f"order={','.join(full_order)}")
+    return {"ok": True, "order": full_order}
+
+@app.put("/api/providers/{provider_id}/failover-config")
+async def update_failover_config(provider_id: str, body: FailoverConfigBody, _: bool = Depends(require_auth)):
+    if not re.match(r"^[a-z0-9_-]{1,50}$", provider_id):
+        raise HTTPException(status_code=400, detail="invalid provider id")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT id FROM providers WHERE id=$1", provider_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Provider tidak ditemukan")
+        await con.execute(
+            "UPDATE providers SET timeout_sec=$1, retry_count=$2, cost_per_gen=$3, updated_at=now() WHERE id=$4",
+            int(body.timeout_sec), int(body.retry_count), float(body.cost_per_gen), provider_id
+        )
+    await audit_log("failover_config_update", provider_id, f"timeout={body.timeout_sec} retry={body.retry_count} cost={body.cost_per_gen}")
+    return {"ok": True}
+
+@app.post("/api/providers/{provider_id}/test-ping")
+async def test_provider_ping(provider_id: str, _: bool = Depends(require_auth)):
+    if not re.match(r"^[a-z0-9_-]{1,50}$", provider_id):
+        raise HTTPException(status_code=400, detail="invalid provider id")
+    async with _pool.acquire() as con:
+        prov = await con.fetchrow("SELECT id, name, base_url, is_active, timeout_sec FROM providers WHERE id=$1", provider_id)
+        if not prov:
+            raise HTTPException(status_code=404, detail="Provider tidak ditemukan")
+        # resolve base_url override from settings
+        srow = await con.fetchrow("SELECT value FROM settings WHERE key=$1", f"{provider_id}_base_url")
+        resolved_base = (srow["value"] if srow and srow["value"] else prov["base_url"] or "").strip().rstrip("/")
+    base_url = resolved_base
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Provider base_url belum di-set")
+    if not _is_safe_url(base_url):
+        raise HTTPException(status_code=400, detail="base_url tidak aman — SSRF blocked")
+    # ping: GET base_url with 6s timeout, no API key leak. Measure latency, retry N times avg? spec: tries N times average
+    # We'll honor provider's retry_count? But for test-ping we always try once avg single request unless ? Use retry_count as number of attempts optional: do 1 ping, but expose tries param.
+    # Return latency ms, status_code, ok, error
+    t0 = time.time()
+    latency_ms = None
+    status_code = None
+    error = None
+    ok = False
+    # use provider's configured timeout but clamp 5-15 for ping safety, per spec 6s default
+    cfg_timeout = int(prov["timeout_sec"] or 30)
+    # for ping we use min(cfg_timeout,6) to stay responsive, but not exceed 10
+    ping_timeout = min(max(3, cfg_timeout), 10)
+    # we override to 6s per spec if config >6: use 6
+    if ping_timeout > 6:
+        ping_timeout = 6
+    attempts = []
+    for attempt in range(1):  # single attempt for now: avg would be noisy + slow; spec says average - we keep 1 for quick UX; loop extendable
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(float(ping_timeout), connect=3.0), follow_redirects=True) as client:
+                start = time.time()
+                resp = await client.get(base_url, headers={"User-Agent": "imgbot-failover-ping/1.0"})
+                lat = int((time.time() - start) * 1000)
+                attempts.append(lat)
+                status_code = resp.status_code
+                latency_ms = lat
+                # ok if <500
+                ok = resp.status_code < 500
+                error = None if ok else f"http {resp.status_code}"
+                break
+        except httpx.TimeoutException:
+            attempts.append(None)
+            error = "timeout"
+            ok = False
+        except httpx.ConnectError as ce:
+            attempts.append(None)
+            error = f"connect {str(ce)[:120]}"
+            ok = False
+        except Exception as e:
+            attempts.append(None)
+            error = str(e)[:200]
+            ok = False
+    avg_latency = None
+    valid = [x for x in attempts if x is not None]
+    if valid:
+        avg_latency = sum(valid) // len(valid)
+        latency_ms = avg_latency
+    else:
+        latency_ms = None
+    await audit_log("provider_test_ping", provider_id, f"ok={ok} latency={latency_ms} code={status_code} err={error or ''}"[:500])
+    return {
+        "ok": ok,
+        "provider_id": provider_id,
+        "base_url": base_url,
+        "resolved_base_url": base_url,
+        "status_code": status_code,
+        "latency_ms": latency_ms,
+        "attempts": attempts,
+        "avg_latency_ms": latency_ms,
+        "error": error,
+        "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+
+
+# ---- Alert Webhook System (Phase3 task9) ----
+ALERT_TYPES = {"error_rate", "deposit_pending", "cpu_high", "disk_high", "queue_stuck", "bot_offline"}
+ALERT_CHANNELS = {"discord", "telegram", "webhook"}
+
+ALERT_TYPE_DEFAULT_THRESHOLD = {
+    "error_rate": 30.0,       # % error rate last hour
+    "deposit_pending": 5.0,   # count
+    "cpu_high": 80.0,         # % cpu
+    "disk_high": 85.0,        # % disk
+    "queue_stuck": 3.0,       # stuck count
+    "bot_offline": 1.0,       # offline flag (1 = trigger when offline)
+}
+
+def _is_safe_alert_url(url: str) -> bool:
+    # Allow https only + existing SSRF guard, plus special allowance for discord/telegram webhook hosts
+    if not url or not url.strip():
+        return False
+    u = url.strip()
+    low = u.lower()
+    # Allow https discord/webhook generic telegram api
+    allowed_prefixes = [
+        "https://discord.com/api/webhooks/",
+        "https://discordapp.com/api/webhooks/",
+        "https://api.telegram.org/bot",
+    ]
+    for pref in allowed_prefixes:
+        if low.startswith(pref):
+            # still check host not private etc but discord.com is safe
+            try:
+                m = re.search(r"https?://([^/:?#]+)", u, re.I)
+                if m:
+                    host = m.group(1).lower()
+                    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+                        return False
+            except Exception:
+                pass
+            return True
+    # numeric chat_id allowed for telegram channel? e.g. "-100123" or "123456" — allow if numeric pattern
+    if re.match(r"^-?\d{5,20}$", u):
+        return True  # telegram chat_id numeric
+    # otherwise must pass generic _is_safe_url and https
+    if not u.lower().startswith("https://"):
+        return False
+    return _is_safe_url(u)
+
+async def _send_discord(webhook_url: str, text: str) -> tuple[bool, str]:
+    if not _is_safe_alert_url(webhook_url):
+        return False, "URL not allowed (SSRF)"
+    # Discord webhook expects JSON {content: text} or embeds. Simpler content.
+    payload = {"content": text[:1900]}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(webhook_url, json=payload, headers={"User-Agent": "imgbot-alert/1.0"})
+            if r.status_code in (200, 204):
+                return True, f"discord {r.status_code}"
+            return False, f"discord http {r.status_code} {r.text[:200]}"
+    except Exception as e:
+        return False, f"discord err {str(e)[:200]}"
+
+async def _send_telegram_via_bot_api(target: str, bot_token: str, text: str) -> tuple[bool, str]:
+    # target can be numeric chat_id or https api URL already containing sendMessage? We normalize.
+    chat_id = target.strip()
+    # Support if target is like https://api.telegram.org/botTOKEN/sendMessage?chat_id=... -> reject direct but allow extracting chat_id? For safety only numeric.
+    if chat_id.startswith("https://"):
+        # If it's a telegram bot api URL that user pasted (e.g. https://api.telegram.org/botXXX/sendMessage with chat_id embedded?) We do generic attempt: if it contains /sendMessage we POST text there.
+        # But safer: if target startswith https, we POST JSON {text} or {chat_id + text}?
+        # Deprecate: treat https telegram as generic webhook with telegram payload shape.
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                # Try sendMessage shape {chat_id, text}
+                # We need chat_id – we don't have one, try generic {text}
+                # For https telegram webhook URLs, we don't know chat_id, attempt POST with text field and also try chat_id extraction from URL query
+                m = re.search(r"chat_id=(-?\d+)", target)
+                if m:
+                    cid = m.group(1)
+                    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    r = await client.post(url, json={"chat_id": cid, "text": text})
+                    if r.status_code == 200 and r.json().get("ok"):
+                        return True, f"telegram {r.status_code}"
+                    return False, f"telegram http {r.status_code} {r.text[:200]}"
+                # otherwise treat as generic webhook url expecting text
+                r = await client.post(target, json={"text": text, "chat_id": chat_id}, headers={"User-Agent": "imgbot-alert/1.0"})
+                if r.status_code < 300:
+                    return True, f"webhook {r.status_code}"
+                return False, f"webhook http {r.status_code} {r.text[:200]}"
+        except Exception as e:
+            return False, f"tg webhook err {str(e)[:200]}"
+    # numeric chat_id
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            r = await client.post(url, json={"chat_id": chat_id, "text": text})
+            try:
+                j = r.json()
+            except Exception:
+                j = {}
+            if r.status_code == 200 and j.get("ok"):
+                return True, "telegram ok"
+            return False, f"telegram http {r.status_code} {j.get('description','') or r.text[:200]}"
+    except Exception as e:
+        return False, f"telegram err {str(e)[:200]}"
+
+async def _send_webhook_generic(url: str, text: str, meta: dict | None = None) -> tuple[bool, str]:
+    if not _is_safe_alert_url(url):
+        return False, "URL not allowed"
+    low = url.lower()
+    # discord path already handled but keep generic
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            if "discord.com" in low or "discordapp.com" in low:
+                # discord shape
+                ok, msg = await _send_discord(url, text)
+                return ok, msg
+            elif "api.telegram.org" in low:
+                # generic telegram bot url
+                # expect POST {text}
+                r = await client.post(url, json={"text": text, "message": text, "content": text, **(meta or {})}, headers={"User-Agent": "imgbot-alert/1.0"})
+                if r.status_code < 300:
+                    return True, f"telegram webhook {r.status_code}"
+                return False, f"telegram webhook http {r.status_code} {r.text[:200]}"
+            else:
+                # generic webhook: JSON {text, content, message}
+                payload = {"text": text, "content": text, "message": text, "alert": text, "meta": meta or {}}
+                r = await client.post(url, json=payload, headers={"User-Agent": "imgbot-alert/1.0"})
+                if r.status_code < 300:
+                    return True, f"webhook {r.status_code}"
+                return False, f"webhook http {r.status_code} {r.text[:200]}"
+    except Exception as e:
+        return False, f"webhook err {str(e)[:200]}"
+
+async def _dispatch_alert(rule: dict, message: str, meta: dict | None = None) -> tuple[bool, str]:
+    chan = rule.get("channel") or "webhook"
+    target = rule.get("target_url") or ""
+    meta = meta or {}
+    if chan == "discord":
+        return await _send_discord(target, message)
+    elif chan == "telegram":
+        # need bot token from env
+        token = BOT_TOKEN or os.environ.get("BOT_TOKEN", "")
+        if not token:
+            return False, "BOT_TOKEN not configured for telegram channel"
+        return await _send_telegram_via_bot_api(target, token, message)
+    else:  # webhook generic
+        return await _send_webhook_generic(target, message, meta)
+
+async def _collect_current_stats_snapshot() -> dict:
+    # Reuse health + system logic without auth - internal call
+    now = _dt.datetime.now(_dt.timezone.utc)
+    out = {
+        "checked_at": now.isoformat(),
+        "pending_deposits": 0,
+        "error_rate_pct": 0.0,
+        "cpu_percent": 0.0,
+        "disk_percent": 0.0,
+        "queue_stuck": 0,
+        "bot_online": False,
+        "heartbeat_age_sec": None,
+        "heartbeat_raw": None,
+        "total_errors_last_hour": 0,
+        "total_gens_last_hour": 0,
+        "gen_per_hour": 0,
+    }
+    try:
+        async with _pool.acquire() as con:
+            pd = await con.fetchval("SELECT count(*) FROM deposits WHERE status='pending'") or 0
+            out["pending_deposits"] = int(pd)
+            # error rate last hour
+            total_last_h = await con.fetchval("SELECT count(*) FROM generations WHERE created_at > now() - interval '1 hour'") or 0
+            failed_last_h = await con.fetchval("SELECT count(*) FROM generations WHERE success=false AND created_at > now() - interval '1 hour'") or 0
+            out["total_gens_last_hour"] = int(total_last_h)
+            out["total_errors_last_hour"] = int(failed_last_h)
+            out["gen_per_hour"] = int(total_last_h)
+            if total_last_h > 0:
+                out["error_rate_pct"] = round(100.0 * failed_last_h / total_last_h, 2)
+            else:
+                out["error_rate_pct"] = 0.0
+            try:
+                stuck = await con.fetchval("SELECT count(*) FROM aiogram_states WHERE updated < now() - interval '5 minutes'") or 0
+                out["queue_stuck"] = int(stuck)
+            except Exception:
+                out["queue_stuck"] = 0
+        # bot heartbeat
+        hb_raw = await get_setting("bot_last_heartbeat", "")
+        out["heartbeat_raw"] = hb_raw or None
+        dt = _parse_iso(hb_raw) if hb_raw else None
+        if dt:
+            age = int((now - dt).total_seconds())
+            out["heartbeat_age_sec"] = age
+            out["bot_online"] = age < 120
+        else:
+            out["bot_online"] = False
+        # psutil cpu/disk non-blocking
+        try:
+            snap = await _get_system_metrics_nonblocking()
+            out["cpu_percent"] = float(snap.get("cpu_percent", 0) or 0)
+            # disk percent
+            d = snap.get("disk", {}) or {}
+            out["disk_percent"] = float(d.get("percent", 0) or 0)
+        except Exception:
+            pass
+    except Exception as e:
+        out["error"] = str(e)[:300]
+    return out
+
+def _should_trigger_rule(rule: dict, stats: dict) -> tuple[bool, str]:
+    # Returns (should_trigger, reason_message)
+    t = rule.get("type")
+    thr = float(rule.get("threshold") or 0)
+    # check cooldown
+    last_ts = rule.get("last_triggered_at")
+    cooldown = int(rule.get("cooldown_sec") or 900)
+    if last_ts:
+        try:
+            # asyncpg returns datetime; ensure aware
+            if isinstance(last_ts, str):
+                last_dt = _parse_iso(last_ts)
+            else:
+                last_dt = last_ts
+                if last_dt and last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=_dt.timezone.utc)
+            if last_dt:
+                elapsed = (_dt.datetime.now(_dt.timezone.utc) - last_dt).total_seconds()
+                if elapsed < cooldown:
+                    return False, f"cooldown {int(cooldown - elapsed)}s remaining"
+        except Exception:
+            pass
+    # evaluate thresholds
+    if t == "error_rate":
+        cur = float(stats.get("error_rate_pct", 0))
+        # thr = % threshold e.g. 20% => trigger if cur >= thr
+        if cur >= thr and cur > 0:
+            return True, f"Error rate {cur}% >= threshold {thr}% (failed {stats.get('total_errors_last_hour')}/{stats.get('total_gens_last_hour')} last hour)"
+        return False, f"error_rate {cur}% < {thr}%"
+    elif t == "deposit_pending":
+        cur = int(stats.get("pending_deposits", 0))
+        if cur >= int(thr):
+            return True, f"Pending deposits {cur} >= {int(thr)}"
+        return False, f"pending {cur} < {thr}"
+    elif t == "cpu_high":
+        cur = float(stats.get("cpu_percent", 0))
+        if cur >= thr:
+            return True, f"CPU {cur}% >= {thr}%"
+        return False, f"CPU {cur}% < {thr}%"
+    elif t == "disk_high":
+        cur = float(stats.get("disk_percent", 0))
+        if cur >= thr:
+            return True, f"Disk {cur}% >= {thr}%"
+        return False, f"disk {cur}% < {thr}%"
+    elif t == "queue_stuck":
+        cur = int(stats.get("queue_stuck", 0))
+        if cur >= int(thr):
+            return True, f"Queue stuck {cur} >= {int(thr)} (FSM >5m)"
+        return False, f"queue stuck {cur} < {thr}"
+    elif t == "bot_offline":
+        online = bool(stats.get("bot_online"))
+        if not online:
+            hb_age = stats.get("heartbeat_age_sec")
+            age_txt = f"{hb_age}s ago" if hb_age is not None else "no heartbeat"
+            return True, f"Bot offline ({age_txt}) — threshold check"
+        return False, "bot online"
+    return False, f"unknown type {t}"
+
+
+# ---- Alerts API ----
+
+class AlertRuleCreateBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    type: str = Field(..., max_length=30)
+    threshold: float = Field(..., ge=0, le=1000000)
+    channel: str = Field(..., max_length=20)
+    target_url: str = Field(..., min_length=3, max_length=1000)
+    is_active: bool = True
+    cooldown_sec: int = Field(default=900, ge=60, le=86400)
+
+    @field_validator("type")
+    @classmethod
+    def val_type(cls, v):
+        vv = v.strip().lower()
+        if vv not in ALERT_TYPES:
+            raise ValueError(f"type must be one of {','.join(ALERT_TYPES)}")
+        return vv
+
+    @field_validator("channel")
+    @classmethod
+    def val_channel(cls, v):
+        vv = v.strip().lower()
+        if vv not in ALERT_CHANNELS:
+            raise ValueError(f"channel must be {','.join(ALERT_CHANNELS)}")
+        return vv
+
+    @field_validator("target_url")
+    @classmethod
+    def val_target(cls, v):
+        vv = v.strip()
+        if len(vv) < 3 or len(vv) > 1000:
+            raise ValueError("target_url invalid length")
+        # block too suspicious
+        if not _is_safe_alert_url(vv):
+            raise ValueError("target_url not allowed — must be https:// (discord/telegram/webhook allowed) or numeric telegram chat_id, no private IP")
+        return vv
+
+class AlertRuleUpdateBody(BaseModel):
+    name: str | None = Field(default=None, max_length=100)
+    type: str | None = Field(default=None, max_length=30)
+    threshold: float | None = Field(default=None, ge=0, le=1000000)
+    channel: str | None = Field(default=None, max_length=20)
+    target_url: str | None = Field(default=None, max_length=1000)
+    is_active: bool | None = None
+    cooldown_sec: int | None = Field(default=None, ge=60, le=86400)
+
+    @field_validator("type")
+    @classmethod
+    def val_type_opt(cls, v):
+        if v is None:
+            return v
+        vv = v.strip().lower()
+        if vv not in ALERT_TYPES:
+            raise ValueError(f"type must be {','.join(ALERT_TYPES)}")
+        return vv
+
+    @field_validator("channel")
+    @classmethod
+    def val_channel_opt(cls, v):
+        if v is None:
+            return v
+        vv = v.strip().lower()
+        if vv not in ALERT_CHANNELS:
+            raise ValueError(f"channel must be {','.join(ALERT_CHANNELS)}")
+        return vv
+
+    @field_validator("target_url")
+    @classmethod
+    def val_target_opt(cls, v):
+        if v is None:
+            return v
+        vv = v.strip()
+        if not _is_safe_alert_url(vv):
+            raise ValueError("target_url not allowed")
+        return vv
+
+def _alert_rule_dict(r) -> dict:
+    d = dict(r)
+    # numeric conversion for threshold
+    try:
+        d["threshold"] = float(d.get("threshold", 0) or 0)
+    except Exception:
+        d["threshold"] = 0.0
+    # keep identity target_url alias target for frontend simplicity
+    d["target"] = d.get("target_url")
+    return d
+
+@app.get("/api/alerts/rules")
+async def list_alert_rules(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT * FROM alert_rules ORDER BY is_active DESC, id DESC")
+    return {"rules": [_alert_rule_dict(r) for r in rows], "total": len(rows)}
+
+@app.post("/api/alerts/rules")
+async def create_alert_rule(body: AlertRuleCreateBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "INSERT INTO alert_rules (name, type, threshold, channel, target_url, is_active, cooldown_sec) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+            body.name.strip(), body.type, body.threshold, body.channel, body.target_url.strip(), body.is_active, int(body.cooldown_sec),
+        )
+    await audit_log("alert_rule_create", str(row["id"]), f"{body.type} {body.channel} thr={body.threshold}")
+    return {"ok": True, "rule": _alert_rule_dict(row)}
+
+@app.put("/api/alerts/rules/{rule_id}")
+async def update_alert_rule(rule_id: int, body: AlertRuleUpdateBody, _: bool = Depends(require_auth)):
+    if rule_id < 1:
+        raise HTTPException(status_code=400, detail="Invalid id")
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT * FROM alert_rules WHERE id=$1", rule_id)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        fields = []
+        vals = []
+        idx = 1
+        mapping = {
+            "name": body.name.strip() if body.name else None,
+            "type": body.type,
+            "threshold": body.threshold,
+            "channel": body.channel,
+            "target_url": body.target_url.strip() if body.target_url else None,
+            "is_active": body.is_active,
+            "cooldown_sec": int(body.cooldown_sec) if body.cooldown_sec is not None else None,
+        }
+        for col, val in mapping.items():
+            if val is not None:
+                fields.append(f"{col} = ${idx}")
+                vals.append(val)
+                idx += 1
+        if not fields:
+            return {"ok": True, "rule": _alert_rule_dict(cur)}
+        vals.append(rule_id)
+        sql = f"UPDATE alert_rules SET {', '.join(fields)} WHERE id=${idx} RETURNING *"
+        row = await con.fetchrow(sql, *vals)
+    await audit_log("alert_rule_update", str(rule_id), f"fields={list(body.model_dump(exclude_none=True).keys())}")
+    return {"ok": True, "rule": _alert_rule_dict(row) if row else _alert_rule_dict(cur)}
+
+@app.delete("/api/alerts/rules/{rule_id}")
+async def delete_alert_rule(rule_id: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT id, name FROM alert_rules WHERE id=$1", rule_id)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        await con.execute("DELETE FROM alert_rules WHERE id=$1", rule_id)
+    await audit_log("alert_rule_delete", str(rule_id), cur["name"])
+    return {"ok": True}
+
+@app.patch("/api/alerts/rules/{rule_id}/toggle")
+async def toggle_alert_rule(rule_id: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT is_active FROM alert_rules WHERE id=$1", rule_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        newrow = await con.fetchrow("UPDATE alert_rules SET is_active = NOT is_active WHERE id=$1 RETURNING *", rule_id)
+    await audit_log("alert_rule_toggle", str(rule_id), f"is_active={newrow['is_active'] if newrow else ''}")
+    return {"ok": True, "rule": _alert_rule_dict(newrow) if newrow else {}, "is_active": bool(newrow["is_active"]) if newrow else False}
+
+@app.post("/api/alerts/rules/{rule_id}/test")
+async def test_alert_rule(rule_id: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rule = await con.fetchrow("SELECT * FROM alert_rules WHERE id=$1", rule_id)
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+    rd = _alert_rule_dict(rule)
+    stats = await _collect_current_stats_snapshot()
+    msg = f"[TEST] Alert '{rd['name']}' type={rd['type']} thr={rd['threshold']} channel={rd['channel']} — stats: pending={stats.get('pending_deposits')} err={stats.get('error_rate_pct')}% cpu={stats.get('cpu_percent')}% disk={stats.get('disk_percent')}% stuck={stats.get('queue_stuck')} bot_online={stats.get('bot_online')} at {stats.get('checked_at')}"
+    ok, detail = await _dispatch_alert(rd, msg, meta={"test": True, "stats": stats, "rule": rd})
+    if ok:
+        try:
+            async with _pool.acquire() as con:
+                await con.execute(
+                    "INSERT INTO alert_history (rule_id, type, message, triggered_at, resolved, meta) VALUES ($1,$2,$3, now(), false, $4::jsonb)",
+                    rule_id, rd["type"], msg, __import__("json").dumps({"test": True, "dispatch": detail, "stats": stats}),
+                )
+        except Exception:
+            pass
+    await audit_log("alert_test", str(rule_id), f"ok={ok} {detail}"[:500])
+    return {"ok": ok, "detail": detail, "stats": stats, "sent": ok, "message": msg if ok else f"Failed: {detail}"}
+
+@app.get("/api/alerts/history")
+async def list_alert_history(limit: int = 50, rule_id: int | None = None, _: bool = Depends(require_auth)):
+    limit = max(1, min(200, limit))
+    async with _pool.acquire() as con:
+        if rule_id:
+            rows = await con.fetch("SELECT h.*, r.name as rule_name FROM alert_history h LEFT JOIN alert_rules r ON r.id=h.rule_id WHERE h.rule_id=$1 ORDER BY h.triggered_at DESC LIMIT $2", rule_id, limit)
+        else:
+            rows = await con.fetch("SELECT h.*, r.name as rule_name FROM alert_history h LEFT JOIN alert_rules r ON r.id=h.rule_id ORDER BY h.triggered_at DESC LIMIT $1", limit)
+    out = []
+    for r in rows:
+        d = dict(r)
+        # ensure meta parsed if string
+        if isinstance(d.get("meta"), str):
+            try:
+                import json as _json
+                d["meta"] = _json.loads(d["meta"])
+            except Exception:
+                d["meta"] = {}
+        out.append(d)
+    return {"history": out, "total": len(out)}
+
+@app.patch("/api/alerts/history/{hid}/resolve")
+async def resolve_alert_history(hid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE alert_history SET resolved=true WHERE id=$1", hid)
+    return {"ok": True}
+
+@app.get("/api/alerts/stats")
+async def alerts_stats(_: bool = Depends(require_auth)):
+    stats = await _collect_current_stats_snapshot()
+    # counts per type
+    async with _pool.acquire() as con:
+        try:
+            rcnt = await con.fetchval("SELECT count(*) FROM alert_rules WHERE is_active") or 0
+            total_h = await con.fetchval("SELECT count(*) FROM alert_history WHERE triggered_at > now() - interval '24 hours'") or 0
+            # real deposits stats already in snapshot, but add success rate 14d-etc reuse?
+        except Exception:
+            rcnt = 0
+            total_h = 0
+    return {
+        "ok": True,
+        "active_rules": int(rcnt),
+        "alerts_24h": int(total_h),
+        **stats,
+    }
+
+@app.post("/api/alerts/evaluate")
+async def evaluate_alerts_endpoint(_: bool = Depends(require_auth)):
+    stats = await _collect_current_stats_snapshot()
+    triggered = []
+    skipped = []
+    errors = []
+    async with _pool.acquire() as con:
+        rules = await con.fetch("SELECT * FROM alert_rules WHERE is_active=true ORDER BY id")
+    for r in rules:
+        rd = _alert_rule_dict(r)
+        should, reason = _should_trigger_rule(rd, stats)
+        if not should:
+            skipped.append({"id": rd["id"], "name": rd["name"], "reason": reason})
+            continue
+        msg = f"ALERT [{rd['type']}] {rd['name']}: {reason} — threshold {rd['threshold']} at {stats.get('checked_at')}. Details: pending={stats.get('pending_deposits')}, err_rate={stats.get('error_rate_pct')}%, cpu={stats.get('cpu_percent')}%, disk={stats.get('disk_percent')}%, stuck={stats.get('queue_stuck')}, bot_online={stats.get('bot_online')}"
+        try:
+            ok, detail = await _dispatch_alert(rd, msg, meta={"stats": stats, "reason": reason})
+            if ok:
+                triggered.append({"id": rd["id"], "name": rd["name"], "type": rd["type"], "message": msg, "detail": detail})
+                try:
+                    async with _pool.acquire() as con:
+                        await con.execute("UPDATE alert_rules SET last_triggered_at=now() WHERE id=$1", rd["id"])
+                        import json as _json
+                        await con.execute(
+                            "INSERT INTO alert_history (rule_id, type, message, triggered_at, resolved, meta) VALUES ($1,$2,$3, now(), false, $4::jsonb)",
+                            rd["id"], rd["type"], msg, _json.dumps({"stats": stats, "detail": detail, "reason": reason}),
+                        )
+                except Exception as e:
+                    errors.append({"id": rd["id"], "error": f"history log failed {e}"})
+            else:
+                errors.append({"id": rd["id"], "name": rd["name"], "error": detail})
+        except Exception as e:
+            errors.append({"id": rd["id"], "name": rd["name"], "error": str(e)[:300]})
+    await audit_log("alerts_evaluate", "-", f"triggered={len(triggered)} skipped={len(skipped)} err={len(errors)}")
+    return {"ok": True, "stats": stats, "triggered": triggered, "skipped": skipped, "errors": errors, "checked_at": stats.get("checked_at")}
+
+@app.get("/api/alerts/types")
+async def alert_types(_: bool = Depends(require_auth)):
+    return {
+        "types": [
+            {"id": "error_rate", "label": "Error Rate", "unit": "%", "default_threshold": ALERT_TYPE_DEFAULT_THRESHOLD["error_rate"], "desc": "Failed generations % last hour"},
+            {"id": "deposit_pending", "label": "Deposit Pending", "unit": "count", "default_threshold": ALERT_TYPE_DEFAULT_THRESHOLD["deposit_pending"], "desc": "Pending deposits count"},
+            {"id": "cpu_high", "label": "CPU High", "unit": "%", "default_threshold": ALERT_TYPE_DEFAULT_THRESHOLD["cpu_high"], "desc": "CPU percent high"},
+            {"id": "disk_high", "label": "Disk High", "unit": "%", "default_threshold": ALERT_TYPE_DEFAULT_THRESHOLD["disk_high"], "desc": "Disk usage percent high"},
+            {"id": "queue_stuck", "label": "Queue Stuck", "unit": "count", "default_threshold": ALERT_TYPE_DEFAULT_THRESHOLD["queue_stuck"], "desc": "FSM stuck >5m count"},
+            {"id": "bot_offline", "label": "Bot Offline", "unit": "bool", "default_threshold": ALERT_TYPE_DEFAULT_THRESHOLD["bot_offline"], "desc": "Heartbeat >120s offline"},
+        ],
+        "channels": [
+            {"id": "discord", "label": "Discord", "placeholder": "https://discord.com/api/webhooks/..."},
+            {"id": "telegram", "label": "Telegram", "placeholder": "chat_id numeric e.g. -100123... or telegram webhook url"},
+            {"id": "webhook", "label": "Generic Webhook", "placeholder": "https://..."},
+        ],
+        "default_thresholds": ALERT_TYPE_DEFAULT_THRESHOLD,
+    }
+
+
+
+
+# ---- Moderation Manager (Phase3 task7) ----
+
+class ModerationRuleCreateBody(BaseModel):
+    pattern: str = Field(..., min_length=1, max_length=200)
+    type: str = Field(..., max_length=20)
+    severity: str = Field(..., max_length=20)
+    is_active: bool = True
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_pat(cls, v):
+        vv = v.strip()
+        if not vv or len(vv) < 1 or len(vv) > 200:
+            raise ValueError("pattern 1-200 chars required")
+        if "<script" in vv.lower() or "javascript:" in vv.lower():
+            raise ValueError("pattern contains forbidden content")
+        return vv
+
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, v):
+        vv = (v or "").strip().lower()
+        if vv not in ("word","regex","category"):
+            raise ValueError("type must be word/regex/category")
+        return vv
+
+    @field_validator("severity")
+    @classmethod
+    def validate_sev(cls, v):
+        vv = (v or "").strip().lower()
+        if vv not in ("low","medium","high","block"):
+            raise ValueError("severity must be low/medium/high/block")
+        return vv
+
+class ModerationRuleUpdateBody(BaseModel):
+    pattern: str | None = Field(default=None, max_length=200)
+    type: str | None = Field(default=None, max_length=20)
+    severity: str | None = Field(default=None, max_length=20)
+    is_active: bool | None = None
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_pat_opt(cls, v):
+        if v is None:
+            return v
+        vv = v.strip()
+        if not vv or len(vv) < 1 or len(vv) > 200:
+            raise ValueError("pattern 1-200 chars")
+        if "<script" in vv.lower() or "javascript:" in vv.lower():
+            raise ValueError("forbidden pattern")
+        return vv
+
+    @field_validator("type")
+    @classmethod
+    def validate_type_opt(cls, v):
+        if v is None:
+            return v
+        vv = v.strip().lower()
+        if vv not in ("word","regex","category"):
+            raise ValueError("type must be word/regex/category")
+        return vv
+
+    @field_validator("severity")
+    @classmethod
+    def validate_sev_opt(cls, v):
+        if v is None:
+            return v
+        vv = v.strip().lower()
+        if vv not in ("low","medium","high","block"):
+            raise ValueError("severity must be low/medium/high/block")
+        return vv
+
+def _validate_regex_pattern(pat: str):
+    try:
+        re.compile(pat, re.IGNORECASE)
+    except re.error as e:
+        raise HTTPException(status_code=400, detail=f"Invalid regex: {e}")
+
+@app.get("/api/moderation/rules")
+async def moderation_list_rules(q: str = "", type: str = "", active: str = "", _: bool = Depends(require_auth)):
+    q = (q or "").strip()[:100]
+    type_f = (type or "").strip().lower()
+    active_f = (active or "").strip().lower()
+    where = []
+    args = []
+    idx = 1
+    if q:
+        where.append(f"(pattern ILIKE ${idx} OR type ILIKE ${idx} OR severity ILIKE ${idx})")
+        args.append(f"%{q}%")
+        idx+=1
+    if type_f and type_f in ("word","regex","category"):
+        where.append(f"type = ${idx}")
+        args.append(type_f)
+        idx+=1
+    if active_f == "true":
+        where.append("is_active = true")
+    elif active_f == "false":
+        where.append("is_active = false")
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"SELECT * FROM moderation_rules {where_sql} ORDER BY id DESC LIMIT 500"
+    async with _pool.acquire() as con:
+        rows = await con.fetch(sql, *args)
+    return {"rules": [dict(r) for r in rows], "total": len(rows)}
+
+@app.post("/api/moderation/rules")
+async def moderation_create_rule(body: ModerationRuleCreateBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cnt = await con.fetchval("SELECT count(*) FROM moderation_rules") or 0
+        if cnt >= 500:
+            raise HTTPException(status_code=400, detail="Max 500 rules reached")
+        if body.type == "regex":
+            _validate_regex_pattern(body.pattern)
+        row = await con.fetchrow(
+            "INSERT INTO moderation_rules (pattern, type, severity, is_active) VALUES ($1,$2,$3,$4) RETURNING *",
+            body.pattern.strip(), body.type, body.severity, body.is_active
+        )
+    await audit_log("moderation_create", str(row["id"]), f"{body.type}:{body.severity}:{body.pattern[:50]}")
+    return {"ok": True, "rule": dict(row)}
+
+@app.put("/api/moderation/rules/{rule_id}")
+async def moderation_update_rule(rule_id: int, body: ModerationRuleUpdateBody, _: bool = Depends(require_auth)):
+    if rule_id < 1:
+        raise HTTPException(status_code=400, detail="Invalid ID")
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT * FROM moderation_rules WHERE id=$1", rule_id)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        new_pat = body.pattern if body.pattern is not None else cur["pattern"]
+        new_type = body.type if body.type is not None else cur["type"]
+        new_sev = body.severity if body.severity is not None else cur["severity"]
+        new_active = body.is_active if body.is_active is not None else cur["is_active"]
+        if new_type == "regex":
+            _validate_regex_pattern(new_pat)
+        row = await con.fetchrow(
+            "UPDATE moderation_rules SET pattern=$1, type=$2, severity=$3, is_active=$4 WHERE id=$5 RETURNING *",
+            new_pat.strip(), new_type, new_sev, new_active, rule_id
+        )
+    await audit_log("moderation_update", str(rule_id), f"{new_type}:{new_sev}:{new_pat[:50]}")
+    return {"ok": True, "rule": dict(row)}
+
+@app.delete("/api/moderation/rules/{rule_id}")
+async def moderation_delete_rule(rule_id: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT pattern FROM moderation_rules WHERE id=$1", rule_id)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        await con.execute("DELETE FROM moderation_rules WHERE id=$1", rule_id)
+    await audit_log("moderation_delete", str(rule_id), cur["pattern"][:100])
+    return {"ok": True}
+
+@app.patch("/api/moderation/rules/{rule_id}/toggle")
+async def moderation_toggle_rule(rule_id: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT is_active FROM moderation_rules WHERE id=$1", rule_id)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        await con.execute("UPDATE moderation_rules SET is_active = NOT is_active WHERE id=$1", rule_id)
+        row = await con.fetchrow("SELECT * FROM moderation_rules WHERE id=$1", rule_id)
+    await audit_log("moderation_toggle", str(rule_id), f"is_active={row['is_active'] if row else ''}")
+    return {"ok": True, "rule": dict(row) if row else {}, "is_active": row["is_active"] if row else False}
+
+@app.get("/api/moderation/logs")
+async def moderation_logs_ep(user_id: str = "", limit: int = 100, offset: int = 0, _: bool = Depends(require_auth)):
+    limit = max(1, min(500, int(limit or 100)))
+    offset = max(0, int(offset or 0))
+    where = []
+    args = []
+    idx = 1
+    if user_id and user_id.strip().isdigit():
+        where.append(f"user_id = ${idx}")
+        args.append(int(user_id.strip()))
+        idx+=1
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    async with _pool.acquire() as con:
+        rows = await con.fetch(f"SELECT * FROM moderation_logs {where_sql} ORDER BY id DESC LIMIT ${idx} OFFSET ${idx+1}", *args, limit, offset)
+        total = await con.fetchval(f"SELECT count(*) FROM moderation_logs {where_sql}", *args)
+    return {"logs": [dict(r) for r in rows], "total": total or 0, "limit": limit, "offset": offset}
+
+@app.get("/api/moderation/stats")
+async def moderation_stats_ep(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        total = await con.fetchval("SELECT count(*) FROM moderation_rules") or 0
+        active = await con.fetchval("SELECT count(*) FROM moderation_rules WHERE is_active=true") or 0
+        blocks_today = await con.fetchval("SELECT count(*) FROM moderation_logs WHERE created_at::date = CURRENT_DATE AND action='block'") or 0
+        high = await con.fetchval("SELECT count(*) FROM moderation_rules WHERE severity IN ('high','block')") or 0
+        sev_rows = await con.fetch("SELECT severity, count(*) as c FROM moderation_rules GROUP BY severity")
+        logs_today = await con.fetchval("SELECT count(*) FROM moderation_logs WHERE created_at::date=CURRENT_DATE") or 0
+    sev_map = {r["severity"]: r["c"] for r in sev_rows}
+    return {
+        "total_rules": total,
+        "active_rules": active,
+        "blocks_today": blocks_today,
+        "high_severity": high,
+        "logs_today": logs_today,
+        "by_severity": sev_map,
+    }

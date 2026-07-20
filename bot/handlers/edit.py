@@ -54,6 +54,40 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
     style_id = await _style_of(message.from_user.id)
     styled_prompt = style_presets.apply_style(prompt, style_id)
 
+    # --- moderation check (Phase3-7) ---
+    try:
+        import moderation as mod_checker
+        import texts as dyn_texts
+        blocked, rule, severity, matched = await mod_checker.check_prompt(prompt)
+        sev_lower = (severity or "").lower() if severity else ""
+        if blocked and rule:
+            dyn_nsfw = await dyn_texts.get_dynamic_text_or_none("nsfw_msg")
+            dyn_banned = await dyn_texts.get_dynamic_text_or_none("banned_msg")
+            if dyn_nsfw and sev_lower in ("nsfw","block","high"):
+                msg_text = dyn_nsfw
+            elif dyn_banned:
+                msg_text = dyn_banned
+            else:
+                if lang == "id":
+                    msg_text = f"🚫 <b>Prompt diblokir</b> oleh moderasi ({severity}).\nKata terdeteksi: <code>{(matched or '')[:80]}</code>\nCoba prompt lain."
+                else:
+                    msg_text = f"🚫 <b>Prompt blocked</b> by moderation ({severity}).\nDetected: <code>{(matched or '')[:80]}</code>\nTry safer prompt."
+            try:
+                await mod_checker.log_block(message.from_user.id, prompt, rule, matched or "", severity or "block")
+            except Exception:
+                pass
+            await message.answer(msg_text, reply_markup=ui.back_menu(lang))
+            if acquired:
+                await QUEUE.release(message.from_user.id)
+            return
+        if rule and matched:
+            try:
+                await mod_checker.log_block(message.from_user.id, prompt, rule, matched or "", severity or "warn")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     try:
         from watermark import should_watermark, apply_watermark_image
         wm_on, wm_text = await should_watermark(message.from_user.id)
