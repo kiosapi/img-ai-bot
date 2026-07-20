@@ -350,7 +350,6 @@ const TRANSLATIONS: Dict = {
   "logs.sub": { id: "Tail log bot/api/postgres - docker logs atau fallback DB", en: "Tail bot/api/postgres logs - docker logs or DB fallback" },
 
   // Dynamic Texts
-  "nav.texts": { id: "Teks Dinamis", en: "Dynamic Texts" },
   "texts.title": { id: "Teks Dinamis", en: "Dynamic Texts" },
   "texts.sub": { id: "Kelola semua teks bot tanpa ubah kode — edit welcome, help, error, referral, premium, dsb. Support HTML.", en: "Manage all bot texts without code — edit welcome, help, errors, referral, premium etc. HTML supported." },
   "texts.total": { id: "Total Kunci", en: "Total Keys" },
