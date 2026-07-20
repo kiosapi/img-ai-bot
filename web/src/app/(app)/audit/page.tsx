@@ -24,8 +24,8 @@ export default function AuditPage() {
   const actionBadge = (a: string) => {
     if (a.includes("login")) return <Badge variant="outline">{a}</Badge>;
     if (a.includes("ban") || a.includes("reject")) return <Badge variant="destructive">{a}</Badge>;
-    if (a.includes("approve") || a.includes("balance")) return <Badge className="bg-emerald-500 text-white">{a}</Badge>;
-    if (a.includes("broadcast")) return <Badge className="bg-amber-500 text-black">{a}</Badge>;
+    if (a.includes("approve") || a.includes("balance")) return <Badge variant="muted">{a}</Badge>;
+    if (a.includes("broadcast")) return <Badge variant="muted">{a}</Badge>;
     return <Badge variant="muted">{a}</Badge>;
   };
 
