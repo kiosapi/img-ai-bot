@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState, useRef, useCallback } from "react";
-import { ScrollText, Bot, Server, Database, Globe, Copy, Pause, Play, Trash2, Search, AlertTriangle, Info, Bug, Terminal, RefreshCw, Check } from "lucide-react";
+import { ScrollText, Bot, Server, Database, Globe, Copy, Pause, Play, Trash2, Search, AlertTriangle, Info, Bug, Terminal, RefreshCw, Check, CheckCircle2 } from "lucide-react";
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -90,8 +90,8 @@ export default function LogsPage() {
       <Card className="w-full max-w-full overflow-hidden">
         <CardHeader className="p-3 sm:p-5 pb-2 flex flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle className="text-sm sm:text-base flex flex-wrap items-center gap-2"><Terminal className="h-4 w-4" />{type.toUpperCase()} LOGS {data && <span className="text-[11px] font-normal text-muted-foreground">· {data.lines_returned} lines · {isRealtime ? "✅ real" : "⚠️ fallback"} {data.container ? `(${data.container})` : ""}</span>}</CardTitle>
-            {isFallback && <span className="text-[11px] bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/20 rounded px-2 py-1">{data?.source?.slice(0, 60)}</span>}
+            <CardTitle className="text-sm sm:text-base flex flex-wrap items-center gap-2"><Terminal className="h-4 w-4" />{type.toUpperCase()} LOGS {data && <span className="text-[11px] font-normal text-muted-foreground flex items-center gap-1">· {data.lines_returned} lines · {isRealtime ? <span className="inline-flex items-center gap-1"><CheckCircle2 className="h-3 w-3 text-emerald-500" />real</span> : <span className="inline-flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-amber-500" />fallback</span>} {data.container ? `(${data.container})` : ""}</span>}</CardTitle>
+            {isFallback && <span className="text-[11px] bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/20 rounded px-2 py-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{data?.source?.slice(0, 60)}</span>}
           </div>
           <div className="flex flex-wrap items-center gap-2 overflow-x-auto">
             <div className="flex items-center gap-1 rounded-full border bg-muted/30 p-0.5 shrink-0">{LEVEL_OPTS.map(o => { const active = level === o.id; return (<button key={o.id} onClick={() => setLevel(o.id as LogLevel)} className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] sm:text-xs font-medium transition shrink-0 ${active ? "bg-card shadow border text-foreground" : "text-muted-foreground hover:text-foreground"}`}><o.icon className={`h-3 w-3 ${active ? (o.id === "error" ? "text-red-500" : o.id === "warn" ? "text-amber-500" : "") : ""}`} />{o.label}</button>); })}</div>
@@ -116,7 +116,7 @@ export default function LogsPage() {
               )}
             </div>
           )}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-muted/20 px-3 py-1.5 text-[10px] sm:text-xs text-muted-foreground"><div className="flex items-center gap-2"><span className="inline-flex items-center gap-1">{isRealtime ? <><span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />real docker</> : isFallback ? "⚠️ fallback DB" : "docker"} · {data?.source?.slice(0, 50)}</span></div><div className="flex items-center gap-2">{auto && <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />live 5s</span>}<span>{data ? `${data.lines_returned}/${data.lines_requested}` : ""}</span></div></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-muted/20 px-3 py-1.5 text-[10px] sm:text-xs text-muted-foreground"><div className="flex items-center gap-2"><span className="inline-flex items-center gap-1">{isRealtime ? <><CheckCircle2 className="h-3 w-3 text-emerald-500" />real docker</> : isFallback ? <><AlertTriangle className="h-3 w-3 text-amber-500" />fallback DB</> : "docker"} · {data?.source?.slice(0, 50)}</span></div><div className="flex items-center gap-2">{auto && <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />live 5s</span>}<span>{data ? `${data.lines_returned}/${data.lines_requested}` : ""}</span></div></div>
         </CardContent>
       </Card>
     </div>
