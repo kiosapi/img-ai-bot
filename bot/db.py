@@ -1539,3 +1539,50 @@ async def log_moderation(user_id: int, prompt: str, matched_pattern: str, rule_i
             )
     except Exception:
         pass
+
+# ---------- broadcast scheduler (Phase4 Task11) ----------
+async def ensure_broadcast_scheduler():
+    async with _pool.acquire() as con:
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS broadcast_schedules (
+                id SERIAL PRIMARY KEY,
+                title TEXT,
+                message TEXT NOT NULL,
+                media_file_id TEXT,
+                media_url TEXT,
+                target_type TEXT DEFAULT 'all' CHECK (target_type IN ('all','premium','active','free')),
+                scheduled_at TIMESTAMPTZ NOT NULL,
+                repeat_type TEXT DEFAULT 'once' CHECK (repeat_type IN ('once','daily','weekly','monthly')),
+                status TEXT DEFAULT 'pending' CHECK (status IN ('pending','sent','sending','failed','cancelled')),
+                last_run_at TIMESTAMPTZ,
+                next_run_at TIMESTAMPTZ,
+                retry_count INT DEFAULT 0,
+                max_retries INT DEFAULT 3,
+                failure_reason TEXT,
+                created_by TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now()
+            );
+            """
+        )
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS broadcast_schedule_logs (
+                id SERIAL PRIMARY KEY,
+                schedule_id INT REFERENCES broadcast_schedules(id) ON DELETE CASCADE,
+                run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed','cancelled')),
+                sent_count INT DEFAULT 0,
+                failed_count INT DEFAULT 0,
+                error_message TEXT,
+                meta JSONB DEFAULT '{}'::jsonb
+            );
+            """
+        )
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedules_scheduled_at ON broadcast_schedules(scheduled_at);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedules_status ON broadcast_schedules(status);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedules_next_run ON broadcast_schedules(next_run_at);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedule_logs_schedule ON broadcast_schedule_logs(schedule_id);")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedule_logs_run_at ON broadcast_schedule_logs(run_at DESC);")
+        await con.execute("UPDATE broadcast_schedules SET next_run_at = scheduled_at WHERE next_run_at IS NULL;")

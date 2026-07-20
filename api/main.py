@@ -12,13 +12,23 @@ import platform
 import psutil
 import socket
 import datetime as _dt
+import hashlib
+import gzip
+import shutil
+import subprocess
+import json as _json_std
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Annotated
-from fastapi import FastAPI, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "/tmp/backups"))
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+_backup_lock = asyncio.Lock()
+_restore_lock = asyncio.Lock()
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -33,6 +43,59 @@ _last_broadcast_ts = 0.0
 _login_attempts: dict[str, list[float]] = {}
 
 # ---------- utils ----------
+def _human_size(n: int | float | None) -> str:
+    try:
+        v = int(n or 0)
+    except Exception:
+        return "0 B"
+    if v < 1024:
+        return f"{v} B"
+    if v < 1024*1024:
+        return f"{v/1024:.1f} KB"
+    if v < 1024*1024*1024:
+        return f"{v/(1024*1024):.1f} MB"
+    return f"{v/(1024*1024*1024):.2f} GB"
+
+def _is_safe_filename(name: str) -> bool:
+    # no path traversal, only safe chars
+    if ".." in name or "/" in name or "\\" in name:
+        return False
+    if len(name) > 200:
+        return False
+    # allow alphanumeric, _, -, ., 
+    if not re.match(r"^[A-Za-z0-9._-]+\.(sql\.gz|dump|sql|gz)$", name):
+        return False
+    return True
+
+def _ensure_backup_dir():
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+def _calculate_checksum(path: Path) -> str:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024*1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+def _backup_file_path(filename: str) -> Path:
+    # resolve + ensure inside BACKUP_DIR
+    _ensure_backup_dir()
+    safe = filename.strip().replace("..", "").replace("/", "_").replace("\\", "_")
+    p = (BACKUP_DIR / safe).resolve()
+    base = BACKUP_DIR.resolve()
+    # ensure path is within base
+    try:
+        p.relative_to(base)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename path traversal blocked")
+    return p
+
 def _is_safe_url(url: str) -> bool:
     u = url.strip()
     low = u.lower()
@@ -99,7 +162,12 @@ def _audience_where(audience: str) -> str:
         return "WHERE NOT is_banned AND premium_until > now()"
     if audience == "free":
         return "WHERE NOT is_banned AND (premium_until IS NULL OR premium_until <= now())"
+    if audience == "active":
+        return "WHERE NOT is_banned AND last_seen > now() - interval '7 days'"
     return "WHERE NOT is_banned"
+
+def _sched_audience_where(target_type: str) -> str:
+    return _audience_where(target_type or "all")
 
 async def _ensure_tables():
     async with _pool.acquire() as con:
@@ -217,6 +285,11 @@ async def _ensure_tables():
                 for idx, r in enumerate(rows):
                     await con.execute("UPDATE providers SET failover_priority=$1 WHERE id=$2", idx, r["id"])
             await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS model_id TEXT;")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations(created_at);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_generations_model_id ON generations(model_id);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_deposits_created_at ON deposits(created_at);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_generations_success ON generations(success);")
         except Exception as fe:
             print(f"warn failover migration: {fe}")
 
@@ -261,6 +334,117 @@ async def _ensure_tables():
             await con.execute("ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb;")
         except Exception as ae:
             print(f"warn alert migration: {ae}")
+
+        # ---- backup & restore 1-click (Phase4 Task12) ----
+        try:
+            await con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backup_history (
+                    id SERIAL PRIMARY KEY,
+                    filename TEXT UNIQUE NOT NULL,
+                    size_bytes BIGINT DEFAULT 0,
+                    type TEXT DEFAULT 'manual' CHECK (type IN ('manual','auto','upload')),
+                    status TEXT DEFAULT 'completed' CHECK (status IN ('in_progress','completed','failed','restoring')),
+                    storage_path TEXT,
+                    checksum TEXT,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    completed_at TIMESTAMPTZ,
+                    error_message TEXT,
+                    meta JSONB DEFAULT '{}'::jsonb
+                );
+                """
+            )
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_backup_history_created ON backup_history(created_at DESC);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_backup_history_type ON backup_history(type);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_backup_history_status ON backup_history(status);")
+            # migrations for existing installs
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS size_bytes BIGINT DEFAULT 0;")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'manual';")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'completed';")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS storage_path TEXT;")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS checksum TEXT;")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS created_by TEXT;")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS error_message TEXT;")
+            await con.execute("ALTER TABLE backup_history ADD COLUMN IF NOT EXISTS meta JSONB DEFAULT '{}'::jsonb;")
+            # ensure check constraints exist (postgres won't add duplicate constraint, so try/catch internally via DO block)
+            try:
+                await con.execute("ALTER TABLE backup_history DROP CONSTRAINT IF EXISTS backup_history_type_check;")
+                await con.execute("ALTER TABLE backup_history ADD CONSTRAINT backup_history_type_check CHECK (type IN ('manual','auto','upload'));")
+            except Exception:
+                pass
+            try:
+                await con.execute("ALTER TABLE backup_history DROP CONSTRAINT IF EXISTS backup_history_status_check;")
+                await con.execute("ALTER TABLE backup_history ADD CONSTRAINT backup_history_status_check CHECK (status IN ('in_progress','completed','failed','restoring'));")
+            except Exception:
+                pass
+        except Exception as be:
+            print(f"warn backup migration: {be}")
+
+        # ---- broadcast scheduler (Phase4 Task11) ----
+        try:
+            await con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS broadcast_schedules (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT,
+                    message TEXT NOT NULL,
+                    media_file_id TEXT,
+                    media_url TEXT,
+                    target_type TEXT DEFAULT 'all' CHECK (target_type IN ('all','premium','active','free')),
+                    scheduled_at TIMESTAMPTZ NOT NULL,
+                    repeat_type TEXT DEFAULT 'once' CHECK (repeat_type IN ('once','daily','weekly','monthly')),
+                    status TEXT DEFAULT 'pending' CHECK (status IN ('pending','sent','sending','failed','cancelled')),
+                    last_run_at TIMESTAMPTZ,
+                    next_run_at TIMESTAMPTZ,
+                    retry_count INT DEFAULT 0,
+                    max_retries INT DEFAULT 3,
+                    failure_reason TEXT,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                );
+                """
+            )
+            await con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS broadcast_schedule_logs (
+                    id SERIAL PRIMARY KEY,
+                    schedule_id INT REFERENCES broadcast_schedules(id) ON DELETE CASCADE,
+                    run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed','cancelled')),
+                    sent_count INT DEFAULT 0,
+                    failed_count INT DEFAULT 0,
+                    error_message TEXT,
+                    meta JSONB DEFAULT '{}'::jsonb
+                );
+                """
+            )
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedules_scheduled_at ON broadcast_schedules(scheduled_at);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedules_status ON broadcast_schedules(status);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedules_next_run ON broadcast_schedules(next_run_at);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedule_logs_schedule ON broadcast_schedule_logs(schedule_id);")
+            await con.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_schedule_logs_run_at ON broadcast_schedule_logs(run_at DESC);")
+            # migrations for older installs
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS title TEXT;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS media_file_id TEXT;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS media_url TEXT;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS target_type TEXT DEFAULT 'all';")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS repeat_type TEXT DEFAULT 'once';")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS last_run_at TIMESTAMPTZ;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS max_retries INT DEFAULT 3;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS failure_reason TEXT;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS created_by TEXT;")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();")
+            await con.execute("ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();")
+            # normalize NULL next_run_at for legacy rows
+            await con.execute("UPDATE broadcast_schedules SET next_run_at = scheduled_at WHERE next_run_at IS NULL;")
+        except Exception as bse:
+            print(f"warn broadcast_schedules migration: {bse}")
 
 async def audit_log(action: str, target: str | None = None, detail: str | None = None):
     try:
@@ -439,7 +623,457 @@ async def broadcast_audience_counts(_: bool = Depends(require_auth)):
         all_c = await con.fetchval("SELECT count(*) FROM users " + _audience_where("all")) or 0
         premium_c = await con.fetchval("SELECT count(*) FROM users " + _audience_where("premium")) or 0
         free_c = await con.fetchval("SELECT count(*) FROM users " + _audience_where("free")) or 0
-    return {"all": all_c, "premium": premium_c, "free": free_c}
+        active_c = await con.fetchval("SELECT count(*) FROM users " + _audience_where("active")) or 0
+    return {"all": all_c, "premium": premium_c, "free": free_c, "active": active_c}
+
+# ---- Broadcast Scheduler (Phase4 Task11) ----
+import json as _jsonb
+
+MEDIA_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,400}$")
+SCHEDULE_VALID_TARGET = {"all","premium","active","free"}
+SCHEDULE_VALID_REPEAT = {"once","daily","weekly","monthly"}
+SCHEDULE_VALID_STATUS = {"pending","sent","sending","failed","cancelled"}
+
+def _parse_iso_dt(s: str) -> _dt.datetime | None:
+    if not s: return None
+    try:
+        txt = s.strip()
+        if txt.endswith("Z"): txt = txt[:-1] + "+00:00"
+        dt = _dt.datetime.fromisoformat(txt)
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+def _compute_next_repeat(base: _dt.datetime, repeat_type: str) -> _dt.datetime | None:
+    if repeat_type == "once": return None
+    if repeat_type == "daily": return base + _dt.timedelta(days=1)
+    if repeat_type == "weekly": return base + _dt.timedelta(days=7)
+    if repeat_type == "monthly": return base + _dt.timedelta(days=30)
+    return None
+
+async def _do_broadcast_send(message: str, media_file_id: str | None, target_type: str, title: str | None = None) -> tuple[int,int,str|None]:
+    """Real send via Telegram bot API, returns (sent, total, error). Reuses broadcast lock."""
+    sanitized = _sanitize_html(message)[:4096]
+    tt = target_type if target_type in SCHEDULE_VALID_TARGET else "all"
+    has_image = bool(media_file_id)
+    try:
+        async with _pool.acquire() as con:
+            rows = await con.fetch("SELECT user_id FROM users " + _sched_audience_where(tt))
+    except Exception as e:
+        return 0,0,str(e)[:300]
+    if not rows:
+        return 0,0,None
+    sem = asyncio.Semaphore(20)
+    sent_counter=0
+    failed_counter=0
+    lock=asyncio.Lock()
+    async def _send_one(client: httpx.AsyncClient, uid: int):
+        nonlocal sent_counter, failed_counter
+        async with sem:
+            try:
+                if has_image:
+                    payload={"chat_id":uid,"photo":media_file_id,"caption":sanitized,"parse_mode":"HTML"}
+                    method="sendPhoto"
+                else:
+                    payload={"chat_id":uid,"text":sanitized,"parse_mode":"HTML"}
+                    method="sendMessage"
+                resp=await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=payload)
+                if resp.status_code==200 and resp.json().get("ok"):
+                    async with lock:
+                        sent_counter+=1
+                else:
+                    failed_body=""
+                    try: failed_body=resp.text[:200]
+                    except: pass
+                    if resp.status_code==429:
+                        try:
+                            retry_after=resp.json().get("parameters",{}).get("retry_after",1)
+                        except: retry_after=1
+                        await asyncio.sleep(float(retry_after))
+                        # one retry after 429
+                        try:
+                            r2=await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=payload)
+                            if r2.status_code==200 and r2.json().get("ok"):
+                                async with lock: sent_counter+=1
+                                return
+                        except: pass
+                    async with lock:
+                        failed_counter+=1
+            except Exception:
+                async with lock:
+                    failed_counter+=1
+    try:
+        async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=30)) as client:
+            await asyncio.gather(*[_send_one(client, r["user_id"]) for r in rows])
+    except Exception as e:
+        return sent_counter, len(rows), str(e)[:300]
+    # log to broadcast_history too
+    try:
+        async with _pool.acquire() as con:
+            await con.execute("INSERT INTO broadcast_history (message, audience, sent, total, image_file_id) VALUES ($1,$2,$3,$4,$5)", message[:4000], tt, sent_counter, len(rows), media_file_id)
+    except: pass
+    return sent_counter, len(rows), None
+
+class ScheduleCreateBody(BaseModel):
+    title: str | None = Field(default=None, max_length=100)
+    message: str = Field(..., min_length=1, max_length=4000)
+    media_file_id: str | None = Field(default=None, max_length=400)
+    media_url: str | None = Field(default=None, max_length=500)
+    target_type: str = Field(default="all", max_length=20)
+    scheduled_at: str = Field(..., max_length=100)
+    repeat_type: str = Field(default="once", max_length=20)
+    max_retries: int | None = Field(default=3, ge=0, le=10)
+    @field_validator("target_type")
+    @classmethod
+    def vt(cls, v): 
+        vv=(v or "all").strip().lower()
+        if vv not in SCHEDULE_VALID_TARGET: raise ValueError(f"target_type must be {','.join(SCHEDULE_VALID_TARGET)}")
+        return vv
+    @field_validator("repeat_type")
+    @classmethod
+    def vr(cls, v):
+        vv=(v or "once").strip().lower()
+        if vv not in SCHEDULE_VALID_REPEAT: raise ValueError(f"repeat_type must be {','.join(SCHEDULE_VALID_REPEAT)}")
+        return vv
+    @field_validator("media_file_id")
+    @classmethod
+    def vm(cls, v):
+        if v is None or v.strip()=="": return None
+        vv=v.strip()
+        if not MEDIA_FILE_ID_RE.match(vv): raise ValueError("media_file_id format invalid ^[A-Za-z0-9_-]{10,400}$")
+        return vv
+    @field_validator("scheduled_at")
+    @classmethod
+    def vs(cls, v):
+        # allow ISO string, parsed later, keep raw
+        if not v or not v.strip(): raise ValueError("scheduled_at required")
+        dt=_parse_iso_dt(v)
+        if not dt: raise ValueError("scheduled_at must be ISO 8601 datetime")
+        return v.strip()
+
+class ScheduleUpdateBody(BaseModel):
+    title: str | None = Field(default=None, max_length=100)
+    message: str | None = Field(default=None, max_length=4000)
+    media_file_id: str | None = Field(default=None, max_length=400)
+    media_url: str | None = Field(default=None, max_length=500)
+    target_type: str | None = Field(default=None, max_length=20)
+    scheduled_at: str | None = Field(default=None, max_length=100)
+    repeat_type: str | None = Field(default=None, max_length=20)
+    max_retries: int | None = Field(default=None, ge=0, le=10)
+    @field_validator("target_type")
+    @classmethod
+    def vt(cls, v):
+        if v is None: return v
+        vv=v.strip().lower()
+        if vv not in SCHEDULE_VALID_TARGET: raise ValueError(f"target_type must be {','.join(SCHEDULE_VALID_TARGET)}")
+        return vv
+    @field_validator("repeat_type")
+    @classmethod
+    def vr(cls, v):
+        if v is None: return v
+        vv=v.strip().lower()
+        if vv not in SCHEDULE_VALID_REPEAT: raise ValueError(f"repeat_type must be {','.join(SCHEDULE_VALID_REPEAT)}")
+        return vv
+    @field_validator("media_file_id")
+    @classmethod
+    def vm(cls, v):
+        if v is None: return v
+        vv=v.strip()
+        if vv=="": return None
+        if not MEDIA_FILE_ID_RE.match(vv): raise ValueError("media_file_id invalid")
+        return vv
+
+@app.get("/api/broadcast/schedules")
+async def list_schedules(status: str = "", q: str = "", target: str = "", repeat: str = "", limit: int = 200, _: bool = Depends(require_auth)):
+    limit = max(1,min(500, int(limit or 200)))
+    status = (status or "").strip().lower()
+    q = (q or "").strip()[:100]
+    target = (target or "").strip().lower()
+    repeat = (repeat or "").strip().lower()
+    where=[]; args=[]; idx=1
+    if status and status in SCHEDULE_VALID_STATUS:
+        where.append(f"status = ${idx}"); args.append(status); idx+=1
+    if target and target in SCHEDULE_VALID_TARGET:
+        where.append(f"target_type = ${idx}"); args.append(target); idx+=1
+    if repeat and repeat in SCHEDULE_VALID_REPEAT:
+        where.append(f"repeat_type = ${idx}"); args.append(repeat); idx+=1
+    if q:
+        like=f"%{q}%"
+        where.append(f"(title ILIKE ${idx} OR message ILIKE ${idx})"); args.append(like); idx+=1
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"SELECT * FROM broadcast_schedules {where_sql} ORDER BY next_run_at ASC NULLS LAST, scheduled_at ASC, id DESC LIMIT ${idx}"
+    args.append(limit)
+    async with _pool.acquire() as con:
+        rows = await con.fetch(sql, *args)
+        # counts
+        try:
+            stats_rows = await con.fetch("SELECT status, count(*) c FROM broadcast_schedules GROUP BY status")
+            total_cnt = await con.fetchval("SELECT count(*) FROM broadcast_schedules") or 0
+            pending_cnt = await con.fetchval("SELECT count(*) FROM broadcast_schedules WHERE status='pending' AND next_run_at <= now()") or 0
+        except Exception:
+            stats_rows=[]; total_cnt=len(rows); pending_cnt=0
+    status_map={r["status"]: int(r["c"]) for r in stats_rows}
+    next_up = None
+    try:
+        for r in rows:
+            if r["status"]=="pending" and r["next_run_at"]:
+                next_up=dict(r)
+                break
+    except: pass
+    return {"schedules": [dict(r) for r in rows], "total": total_cnt, "counts": status_map, "pending_due": int(pending_cnt), "next_upcoming": next_up, "next": next_up}
+
+@app.post("/api/broadcast/schedules")
+async def create_schedule(body: ScheduleCreateBody, _: bool = Depends(require_auth)):
+    dt = _parse_iso_dt(body.scheduled_at)
+    if not dt:
+        raise HTTPException(status_code=400, detail="scheduled_at invalid ISO")
+    now = _dt.datetime.now(_dt.timezone.utc)
+    # allow past? spec says future validation — enforce future but allow small clock skew 60s past
+    if dt < now - _dt.timedelta(seconds=60):
+        # still allow if repeat? spec says future validation, but for cron we warn: require future unless admin wants immediate schedule
+        # enforce future for once, allow past 1h for repeating? Simplest: reject if >5m past
+        if dt < now - _dt.timedelta(minutes=5):
+            raise HTTPException(status_code=400, detail="scheduled_at harus di masa depan (ISO future)")
+    msg_sanitized = _sanitize_html(body.message)[:4000]
+    if not msg_sanitized.strip():
+        raise HTTPException(status_code=400, detail="message kosong setelah sanitasi")
+    title = (body.title or "").strip()[:100] if body.title else None
+    if title is not None and len(title)==0: title=None
+    # compute next_run
+    next_run = dt
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "INSERT INTO broadcast_schedules (title, message, media_file_id, media_url, target_type, scheduled_at, repeat_type, status, next_run_at, max_retries) VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9) RETURNING *",
+            title, body.message.strip(), body.media_file_id, body.media_url, body.target_type, dt, body.repeat_type, next_run, int(body.max_retries or 3)
+        )
+    await audit_log("broadcast_schedule_create", str(row["id"]), f"{body.target_type} {body.repeat_type} {dt.isoformat()} title={title or ''}")
+    return {"ok": True, "schedule": dict(row)}
+
+@app.get("/api/broadcast/schedules/{sid}")
+async def get_schedule(sid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM broadcast_schedules WHERE id=$1", sid)
+        if not row:
+            raise HTTPException(status_code=404, detail="Schedule tidak ditemukan")
+    return {"schedule": dict(row)}
+
+@app.put("/api/broadcast/schedules/{sid}")
+async def update_schedule(sid: int, body: ScheduleUpdateBody, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT * FROM broadcast_schedules WHERE id=$1", sid)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Schedule tidak ditemukan")
+        if cur["status"] in ("sending",):
+            raise HTTPException(status_code=400, detail="Tidak bisa edit saat status sending")
+        updates={}
+        if body.title is not None:
+            t=body.title.strip()[:100]
+            updates["title"]= t if t else None
+        if body.message is not None:
+            m=body.message.strip()
+            if len(m)<1 or len(m)>4000: raise HTTPException(status_code=400, detail="message 1-4000")
+            _san = _sanitize_html(m)
+            if not _san.strip(): raise HTTPException(status_code=400, detail="message kosong setelah sanitasi")
+            updates["message"]=m
+        if body.media_file_id is not None:
+            updates["media_file_id"]=body.media_file_id
+        if body.media_url is not None:
+            updates["media_url"]=body.media_url if body.media_url.strip() else None
+        if body.target_type is not None:
+            updates["target_type"]=body.target_type
+        if body.repeat_type is not None:
+            updates["repeat_type"]=body.repeat_type
+        dt_new=None
+        if body.scheduled_at is not None:
+            dt_new=_parse_iso_dt(body.scheduled_at)
+            if not dt_new: raise HTTPException(status_code=400, detail="scheduled_at invalid")
+            updates["scheduled_at"]=dt_new
+            # recalc next_run_at if pending or if resetting
+            # keep last_run logic: next_run = dt_new if status pending else keep? we recalc
+            updates["next_run_at"]=dt_new
+        if body.max_retries is not None:
+            updates["max_retries"]=int(body.max_retries)
+        if not updates:
+            return {"ok": True, "schedule": dict(cur)}
+        # build dynamic sql
+        fields=[]; vals=[]; idx=1
+        for k,v in updates.items():
+            fields.append(f"{k} = ${idx}"); vals.append(v); idx+=1
+        fields.append(f"updated_at = now()")
+        vals.append(sid)
+        sql = f"UPDATE broadcast_schedules SET {', '.join(fields)} WHERE id=${idx} RETURNING *"
+        row = await con.fetchrow(sql, *vals)
+    await audit_log("broadcast_schedule_update", str(sid), f"fields={list(updates.keys())}")
+    return {"ok": True, "schedule": dict(row) if row else dict(cur)}
+
+@app.delete("/api/broadcast/schedules/{sid}")
+async def delete_schedule(sid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT id, title FROM broadcast_schedules WHERE id=$1", sid)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Schedule tidak ditemukan")
+        await con.execute("DELETE FROM broadcast_schedules WHERE id=$1", sid)
+    await audit_log("broadcast_schedule_delete", str(sid), f"{cur['title'] or ''}")
+    return {"ok": True}
+
+@app.post("/api/broadcast/schedules/{sid}/cancel")
+async def cancel_schedule(sid: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT * FROM broadcast_schedules WHERE id=$1", sid)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Schedule tidak ditemukan")
+        if cur["status"] in ("sent","cancelled"):
+            return {"ok": True, "schedule": dict(cur), "note": f"already {cur['status']}"}
+        row = await con.fetchrow("UPDATE broadcast_schedules SET status='cancelled', updated_at=now() WHERE id=$1 RETURNING *", sid)
+        await con.execute("INSERT INTO broadcast_schedule_logs (schedule_id, status, error_message) VALUES ($1,'cancelled','cancelled by admin')", sid)
+    await audit_log("broadcast_schedule_cancel", str(sid), "")
+    return {"ok": True, "schedule": dict(row) if row else dict(cur)}
+
+@app.post("/api/broadcast/schedules/{sid}/run-now")
+async def run_now_schedule(sid: int, _: bool = Depends(require_auth)):
+    # prevent concurrent
+    if _broadcast_lock.locked():
+        raise HTTPException(status_code=429, detail="Broadcast lain sedang berjalan, coba lagi nanti")
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT * FROM broadcast_schedules WHERE id=$1", sid)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Schedule tidak ditemukan")
+        if cur["status"] == "sending":
+            raise HTTPException(status_code=400, detail="Schedule sedang sending")
+        # mark sending
+        await con.execute("UPDATE broadcast_schedules SET status='sending', updated_at=now() WHERE id=$1", sid)
+    try:
+        async with _broadcast_lock:
+            sent, total, err = await _do_broadcast_send(cur["message"], cur["media_file_id"], cur["target_type"] or "all", cur["title"])
+            now = _dt.datetime.now(_dt.timezone.utc)
+            failed = (total - sent) if total else 0
+            next_status = "sent" if not err else "failed"
+            # handle repeat: if run-now triggered manually, we still respect repeat?
+            # For manual run-now, if repeat != once, compute next run from now, status -> pending again? Spec says run-now trigger immediate send.
+            # We'll keep logic: if repeat != once and manual run-now, set next_run_at to next repeat based on scheduled_at or now, status pending for next cycle, but log sent.
+            # Simpler: if repeat != once, after run-now success -> compute next repeat, status pending, last_run_at=now
+            # If repeat == once: status = sent/failed
+            repeat_type = cur["repeat_type"] or "once"
+            if repeat_type != "once" and next_status=="sent":
+                # compute next from scheduled_at or now? use scheduled_at as anchor + interval until future
+                anchor = cur["scheduled_at"] or now
+                # ensure next ahead of now
+                nxt = anchor
+                loops=0
+                while nxt <= now and loops < 100:
+                    nxt = _compute_next_repeat(nxt, repeat_type) or now + _dt.timedelta(days=1)
+                    loops+=1
+                async with _pool.acquire() as con:
+                    row = await con.fetchrow("UPDATE broadcast_schedules SET status='pending', last_run_at=$2, next_run_at=$3, retry_count=0, updated_at=now(), failure_reason=NULL WHERE id=$1 RETURNING *", sid, now, nxt)
+                    await con.execute("INSERT INTO broadcast_schedule_logs (schedule_id, status, sent_count, failed_count, error_message, meta) VALUES ($1,'sent',$2,$3,$4,$5::jsonb)", sid, sent, failed, err, _jsonb.dumps({"run_type":"run_now","total":total}))
+            else:
+                async with _pool.acquire() as con:
+                    if next_status=="sent":
+                        row = await con.fetchrow("UPDATE broadcast_schedules SET status='sent', last_run_at=$2, retry_count=0, updated_at=now(), failure_reason=NULL WHERE id=$1 RETURNING *", sid, now)
+                    else:
+                        new_retry = (cur["retry_count"] or 0)+1
+                        ftxt = err or "broadcast failed"
+                        if new_retry >= (cur["max_retries"] or 3):
+                            row = await con.fetchrow("UPDATE broadcast_schedules SET status='failed', last_run_at=$2, retry_count=$3, failure_reason=$4, updated_at=now() WHERE id=$1 RETURNING *", sid, now, new_retry, ftxt)
+                        else:
+                            row = await con.fetchrow("UPDATE broadcast_schedules SET status='pending', last_run_at=$2, retry_count=$3, failure_reason=$4, next_run_at=now()+interval '5 minutes', updated_at=now() WHERE id=$1 RETURNING *", sid, now, new_retry, ftxt)
+                        # log failed
+                    await con.execute("INSERT INTO broadcast_schedule_logs (schedule_id, status, sent_count, failed_count, error_message, meta) VALUES ($1,$2,$3,$4,$5,$6::jsonb)", sid, next_status, sent, failed, err, _jsonb.dumps({"run_type":"run_now","total":total}))
+    except Exception as e:
+        async with _pool.acquire() as con:
+            await con.execute("UPDATE broadcast_schedules SET status='failed', failure_reason=$2, retry_count=retry_count+1, updated_at=now() WHERE id=$1", sid, str(e)[:500])
+            await con.execute("INSERT INTO broadcast_schedule_logs (schedule_id, status, error_message) VALUES ($1,'failed',$2)", sid, str(e)[:500])
+        raise HTTPException(status_code=500, detail=f"run-now failed: {e}")
+    await audit_log("broadcast_schedule_run_now", str(sid), f"sent={sent}/{total} err={err or ''}")
+    sched = dict(row) if 'row' in locals() and row else dict(cur)
+    return {"ok": True, "schedule": sched, "sent": sent, "total": total, "error": err}
+
+@app.get("/api/broadcast/schedules/{sid}/logs")
+async def get_schedule_logs(sid: int, limit: int = 100, _: bool = Depends(require_auth)):
+    limit = max(1,min(500, int(limit or 100)))
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT id FROM broadcast_schedules WHERE id=$1", sid)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Schedule tidak ditemukan")
+        rows = await con.fetch("SELECT * FROM broadcast_schedule_logs WHERE schedule_id=$1 ORDER BY run_at DESC, id DESC LIMIT $2", sid, limit)
+    return {"logs": [dict(r) for r in rows], "schedule_id": sid, "total": len(rows)}
+
+@app.post("/api/broadcast/schedules/evaluate")
+async def evaluate_schedules(_: bool = Depends(require_auth)):
+    """Cron endpoint: checks schedules where next_run_at <= now() and status pending, runs them."""
+    now = _dt.datetime.now(_dt.timezone.utc)
+    async with _pool.acquire() as con:
+        due = await con.fetch("SELECT * FROM broadcast_schedules WHERE status='pending' AND next_run_at <= $1 ORDER BY next_run_at ASC LIMIT 20", now)
+    if not due:
+        return {"ok": True, "processed": [], "count": 0, "checked_at": now.isoformat()}
+    processed=[]
+    for sched in due:
+        sid = sched["id"]
+        # avoid concurrent with broadcast lock -> try acquire lock via flag
+        if _broadcast_lock.locked():
+            processed.append({"id": sid, "status": "skipped", "reason": "broadcast lock busy"})
+            continue
+        # mark sending
+        try:
+            async with _pool.acquire() as con:
+                await con.execute("UPDATE broadcast_schedules SET status='sending', updated_at=now() WHERE id=$1", sid)
+        except Exception as e:
+            processed.append({"id": sid, "status": "error", "error": str(e)[:200]})
+            continue
+        try:
+            async with _broadcast_lock:
+                sent, total, err = await _do_broadcast_send(sched["message"], sched["media_file_id"], sched["target_type"] or "all", sched["title"])
+            failed = (total - sent) if total else 0
+            repeat_type = sched["repeat_type"] or "once"
+            async with _pool.acquire() as con:
+                if not err:
+                    if repeat_type == "once":
+                        await con.execute("UPDATE broadcast_schedules SET status='sent', last_run_at=$2, next_run_at=NULL, retry_count=0, failure_reason=NULL, updated_at=now() WHERE id=$1", sid, now)
+                    else:
+                        # compute next
+                        base = sched["next_run_at"] or sched["scheduled_at"] or now
+                        nxt = _compute_next_repeat(base, repeat_type)
+                        # if nxt still past, bump until future
+                        loops=0
+                        while nxt and nxt <= now and loops<100:
+                            nxt = _compute_next_repeat(nxt, repeat_type)
+                            loops+=1
+                        await con.execute("UPDATE broadcast_schedules SET status='pending', last_run_at=$2, next_run_at=$3, retry_count=0, failure_reason=NULL, updated_at=now() WHERE id=$1", sid, now, nxt)
+                    await con.execute("INSERT INTO broadcast_schedule_logs (schedule_id, status, sent_count, failed_count, meta) VALUES ($1,'sent',$2,$3,$4::jsonb)", sid, sent, failed, _jsonb.dumps({"run_type":"cron","total":total,"repeat":repeat_type}))
+                    processed.append({"id": sid, "status": "sent", "sent": sent, "total": total, "next_repeat": repeat_type})
+                else:
+                    # failure -> retry logic
+                    new_retry = (sched["retry_count"] or 0)+1
+                    max_r = sched["max_retries"] or 3
+                    if new_retry >= max_r:
+                        await con.execute("UPDATE broadcast_schedules SET status='failed', last_run_at=$2, retry_count=$3, failure_reason=$4, updated_at=now() WHERE id=$1", sid, now, new_retry, err[:500])
+                        await con.execute("INSERT INTO broadcast_schedule_logs (schedule_id, status, sent_count, failed_count, error_message, meta) VALUES ($1,'failed',$2,$3,$4,$5::jsonb)", sid, sent, failed, err[:500], _jsonb.dumps({"run_type":"cron","total":total}))
+                        processed.append({"id": sid, "status": "failed", "error": err[:200], "retry": new_retry})
+                    else:
+                        await con.execute("UPDATE broadcast_schedules SET status='pending', last_run_at=$2, retry_count=$3, failure_reason=$4, next_run_at=now()+interval '5 minutes', updated_at=now() WHERE id=$1", sid, now, new_retry, err[:500])
+                        await con.execute("INSERT INTO broadcast_schedule_logs (schedule_id, status, sent_count, failed_count, error_message, meta) VALUES ($1,'failed',$2,$3,$4,$5::jsonb)", sid, sent, failed, err[:500], _jsonb.dumps({"run_type":"cron-retry","total":total}))
+                        processed.append({"id": sid, "status": "retry", "error": err[:200], "retry": new_retry})
+        except Exception as e:
+            try:
+                async with _pool.acquire() as con:
+                    await con.execute("UPDATE broadcast_schedules SET status='failed', failure_reason=$2, retry_count=retry_count+1, updated_at=now() WHERE id=$1", sid, str(e)[:500])
+            except: pass
+            processed.append({"id": sid, "status": "error", "error": str(e)[:300]})
+    # fetch updated rows for response
+    try:
+        async with _pool.acquire() as con:
+            ids = [p["id"] for p in processed if isinstance(p.get("id"), int)]
+            if ids:
+                rows = await con.fetch("SELECT * FROM broadcast_schedules WHERE id = ANY($1)", ids)
+                mp = {r["id"]: dict(r) for r in rows}
+                for p in processed:
+                    if p["id"] in mp:
+                        p["schedule"]=mp[p["id"]]
+    except: pass
+    await audit_log("broadcast_schedules_evaluate", "-", f"checked={len(due)} processed={len(processed)}")
+    return {"ok": True, "processed": processed, "count": len(processed), "checked_at": now.isoformat()}
+
 
 @app.get("/api/broadcast/history")
 async def broadcast_history(_: bool = Depends(require_auth)):
@@ -3313,3 +3947,869 @@ async def moderation_stats_ep(_: bool = Depends(require_auth)):
         "logs_today": logs_today,
         "by_severity": sev_map,
     }
+
+
+# ---- Cost Tracker (Phase4 Task10) ----
+def _parse_cost_period(p: str) -> int:
+    p = (p or "30d").strip().lower()
+    mapping = {"7d": 7, "30d": 30, "90d": 90, "365d": 365, "7": 7, "30": 30, "90": 90, "365": 365}
+    if p in mapping:
+        return mapping[p]
+    raise HTTPException(status_code=400, detail="period must be 7d|30d|90d|365d")
+
+class CostProviderUpdateBody(BaseModel):
+    cost_per_gen: float = Field(..., ge=0, le=100000)
+
+@app.get("/api/cost/providers")
+async def cost_list_providers(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch(
+            "SELECT id, name, base_url, is_active, failover_priority, timeout_sec, retry_count, cost_per_gen FROM providers ORDER BY failover_priority ASC, id ASC"
+        )
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["cost_per_gen"] = float(d.get("cost_per_gen") or 0)
+        except Exception:
+            d["cost_per_gen"] = 0.0
+        out.append(d)
+    return {"providers": out, "total": len(out)}
+
+@app.put("/api/cost/providers/{provider_id}")
+async def cost_update_provider(provider_id: str, body: CostProviderUpdateBody, _: bool = Depends(require_auth)):
+    if not re.match(r"^[a-z0-9_-]{1,50}$", provider_id):
+        raise HTTPException(status_code=400, detail="invalid provider id")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT id FROM providers WHERE id=$1", provider_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        await con.execute("UPDATE providers SET cost_per_gen=$1, updated_at=now() WHERE id=$2", float(body.cost_per_gen), provider_id)
+    await audit_log("cost_provider_update", provider_id, f"cost_per_gen={body.cost_per_gen}")
+    return {"ok": True, "provider_id": provider_id, "cost_per_gen": float(body.cost_per_gen)}
+
+@app.get("/api/cost/stats")
+async def cost_stats(period: str = "30d", _: bool = Depends(require_auth)):
+    days = _parse_cost_period(period)
+    period_label = f"{days}d"
+    # collect providers base
+    async with _pool.acquire() as con:
+        prov_rows = await con.fetch("SELECT id, name, base_url, is_active, cost_per_gen FROM providers ORDER BY failover_priority ASC, id ASC")
+        providers = []
+        for r in prov_rows:
+            d = dict(r)
+            try:
+                d["cost_per_gen"] = float(d.get("cost_per_gen") or 0)
+            except Exception:
+                d["cost_per_gen"] = 0.0
+            providers.append(d)
+        avg_cost = sum(p["cost_per_gen"] for p in providers) / len(providers) if providers else 0
+
+        # map model -> provider + cost
+        model_to_provider = {}
+        try:
+            mrows = await con.fetch("SELECT id, provider_id, external_id, display_name FROM ai_models")
+            for mr in mrows:
+                model_to_provider[mr["id"]] = {"provider_id": mr["provider_id"], "display_name": mr["display_name"] or mr["id"]}
+        except Exception:
+            pass
+
+        # provider cost map
+        cost_map = {p["id"]: p["cost_per_gen"] for p in providers}
+
+        # daily gens via generate_series — avoids missing date gaps
+        # we need dynamic aggregation; bucket by DATE
+        daily_raw = await con.fetch(
+            f"""
+            SELECT DATE(g.created_at) as d,
+                   COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE g.success) as success_cnt,
+                   COUNT(*) FILTER (WHERE NOT g.success) as failed_cnt
+            FROM generations g
+            WHERE g.created_at >= now() - interval '{days} days'
+            GROUP BY DATE(g.created_at)
+            ORDER BY d ASC
+            """,
+        )
+        # revenue daily: deposits approved + orders approved both sum
+        dep_daily = await con.fetch(
+            f"""
+            SELECT DATE(d.created_at) as d, COALESCE(SUM(d.amount),0) as revenue
+            FROM deposits d
+            WHERE d.status='approved' AND d.created_at >= now() - interval '{days} days'
+            GROUP BY DATE(d.created_at)
+            ORDER BY d ASC
+            """,
+        )
+        ord_daily = await con.fetch(
+            f"""
+            SELECT DATE(o.created_at) as d, COALESCE(SUM(o.amount),0) as revenue
+            FROM orders o
+            WHERE o.status='approved' AND o.created_at >= now() - interval '{days} days'
+            GROUP BY DATE(o.created_at)
+            ORDER BY d ASC
+            """,
+        )
+        # totals revenue period
+        try:
+            dep_total = await con.fetchval(
+                f"SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status='approved' AND created_at >= now() - interval '{days} days'"
+            ) or 0
+        except Exception:
+            dep_total = 0
+        try:
+            ord_total = await con.fetchval(
+                f"SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='approved' AND created_at >= now() - interval '{days} days'"
+            ) or 0
+        except Exception:
+            ord_total = 0
+
+        # provider breakdown try via model_id join; fallback to estimated distribution if no model_id tracking
+        prov_breakdown_raw = []
+        try:
+            prov_breakdown_raw = await con.fetch(
+                f"""
+                SELECT
+                  am.provider_id as pid,
+                  am.id as model_full_id,
+                  am.display_name as model_name,
+                  COUNT(*) as gen_count,
+                  COUNT(*) FILTER (WHERE g.success) as success_cnt,
+                  COUNT(*) FILTER (WHERE NOT g.success) as failed_cnt
+                FROM generations g
+                LEFT JOIN ai_models am ON am.id = g.model_id
+                WHERE g.created_at >= now() - interval '{days} days' AND am.provider_id IS NOT NULL
+                GROUP BY am.provider_id, am.id, am.display_name
+                ORDER BY gen_count DESC
+                """,
+            )
+        except Exception:
+            prov_breakdown_raw = []
+
+        # aggregated per provider from above grouping
+        prov_agg = {}
+        model_agg = {}
+        for r in prov_breakdown_raw:
+            pid = r["pid"]
+            mf_id = r["model_full_id"] or pid
+            gen_c = int(r["gen_count"] or 0)
+            succ = int(r["success_cnt"] or 0)
+            fail = int(r["failed_cnt"] or 0)
+            # per provider aggregation
+            if pid not in prov_agg:
+                prov_agg[pid] = {"gen_count": 0, "success": 0, "failed": 0}
+            prov_agg[pid]["gen_count"] += gen_c
+            prov_agg[pid]["success"] += succ
+            prov_agg[pid]["failed"] += fail
+            # per model
+            key = mf_id
+            if key not in model_agg:
+                model_agg[key] = {
+                    "model_id": mf_id,
+                    "model_name": r["model_name"] or mf_id,
+                    "provider_id": pid,
+                    "gen_count": 0,
+                    "success": 0,
+                    "failed": 0,
+                }
+            model_agg[key]["gen_count"] += gen_c
+            model_agg[key]["success"] += succ
+            model_agg[key]["failed"] += fail
+
+        # total gens for period (for total cost estimate + fallback)
+        total_gens_row = await con.fetchval(f"SELECT count(*) FROM generations WHERE created_at >= now() - interval '{days} days'") or 0
+        success_gens_row = await con.fetchval(f"SELECT count(*) FROM generations WHERE success AND created_at >= now() - interval '{days} days'") or 0
+        failed_gens_row = total_gens_row - success_gens_row if total_gens_row else 0
+
+    # Build daily map dict for quick calc
+    import datetime as _dt2
+    today = _dt2.date.today()
+    daily_map = {r["d"]: {"total": int(r["total"] or 0), "success": int(r["success_cnt"] or 0), "failed": int(r["failed_cnt"] or 0)} for r in daily_raw}
+    dep_map = {r["d"]: float(r["revenue"] or 0) for r in dep_daily}
+    ord_map = {r["d"]: float(r["revenue"] or 0) for r in ord_daily}
+
+    # If provider model tracking missing (prov_agg empty but gens exist), estimate per-provider share equally or via is_active proportion
+    if not prov_agg and int(total_gens_row or 0) > 0 and providers:
+        active_ps = [p for p in providers if p["is_active"]] or providers
+        per_share = int(total_gens_row) // len(active_ps) if active_ps else 0
+        remainder = int(total_gens_row) % len(active_ps) if active_ps else 0
+        for i, p in enumerate(active_ps):
+            c = per_share + (1 if i < remainder else 0)
+            prov_agg[p["id"]] = {"gen_count": c, "success": c, "failed": 0}
+
+    # daily loop produce aligned array for each date in period
+    daily_result = []
+    total_cost_calc = 0.0
+    total_rev_calc = float(dep_total or 0) + float(ord_total or 0)
+    # For daily cost estimate: if we have provider breakdown but daily distribution unknown per-provider, we use total gen * weighted avg cost per gen derived from actual provider shares
+    # compute weighted avg cost per gen actually observed
+    total_weighted_cost = 0.0
+    total_tracked_gens = 0
+    for pid, agg in prov_agg.items():
+        cp = cost_map.get(pid, avg_cost)
+        gen_c = agg["gen_count"]
+        total_weighted_cost += gen_c * cp
+        total_tracked_gens += gen_c
+    # if tracked gens < total, use avg_cost for remainder
+    remaining_gens = int(total_gens_row or 0) - total_tracked_gens
+    if remaining_gens > 0:
+        total_weighted_cost += remaining_gens * (avg_cost or 0)
+
+    per_gen_cost_used = (total_weighted_cost / total_gens_row) if total_gens_row else (avg_cost or 0)
+
+    for offset in range(days):
+        d = today - _dt2.timedelta(days=days - 1 - offset)
+        gm = daily_map.get(d, {"total": 0, "success": 0, "failed": 0})
+        gen_cnt = gm["total"]
+        succ = gm["success"]
+        fail = gm["failed"]
+        rev_dep = dep_map.get(d, 0.0)
+        rev_ord = ord_map.get(d, 0.0)
+        revenue = float(rev_dep + rev_ord)
+        cost = float(gen_cnt) * float(per_gen_cost_used)
+        profit = revenue - cost
+        total_cost_calc += cost
+        daily_result.append({
+            "date": d.isoformat(),
+            "day": d.strftime("%d/%m"),
+            "gen_count": gen_cnt,
+            "success": succ,
+            "failed": fail,
+            "revenue": revenue,
+            "cost": cost,
+            "profit": profit,
+        })
+
+    # final totals: revenue from dep_total+ord_total already fetched, but unify with daily sum for consistency
+    # recalc totals to match daily sums for chart sanity; use fetched totals as primary but align
+    # if daily revenue sum differs due to timezone DATE grouping vs exact interval, keep fetched totals as revenue total and daily array as display approx
+    total_cost = float(total_weighted_cost)
+    total_revenue = float(total_rev_calc)
+    total_profit = total_revenue - total_cost
+    total_gens = int(total_gens_row or 0)
+    total_success = int(success_gens_row or 0)
+    total_failed = int(failed_gens_row or 0)
+    avg_cost_per_gen = (total_cost / total_gens) if total_gens > 0 else 0.0
+
+    # provider breakdown list
+    provider_breakdown = []
+    for p in providers:
+        agg = prov_agg.get(p["id"], {"gen_count": 0, "success": 0, "failed": 0})
+        gc = agg["gen_count"]
+        succ = agg["success"]
+        fail = agg.get("failed", gc - succ)
+        rate = round(100.0 * succ / gc, 1) if gc > 0 else 0.0
+        tc = float(gc) * float(p["cost_per_gen"] or 0)
+        provider_breakdown.append({
+            "id": p["id"],
+            "name": p["name"] or p["id"],
+            "is_active": bool(p["is_active"]),
+            "cost_per_gen": float(p["cost_per_gen"] or 0),
+            "gen_count": gc,
+            "success": succ,
+            "failed": fail,
+            "success_rate": rate,
+            "total_cost": tc,
+        })
+    provider_breakdown.sort(key=lambda x: x["total_cost"], reverse=True)
+
+    # model breakdown
+    model_breakdown = []
+    for mid, ag in model_agg.items():
+        pid = ag["provider_id"]
+        cp = cost_map.get(pid, avg_cost)
+        gc = ag["gen_count"]
+        succ = ag["success"]
+        fail = ag["failed"]
+        rate = round(100.0 * succ / gc, 1) if gc > 0 else 0.0
+        tc = float(gc) * float(cp)
+        model_breakdown.append({
+            "model_id": mid,
+            "display_name": ag["model_name"] or mid,
+            "provider_id": pid,
+            "cost_per_gen": float(cp),
+            "gen_count": gc,
+            "success": succ,
+            "failed": fail,
+            "success_rate": rate,
+            "total_cost": tc,
+        })
+    model_breakdown.sort(key=lambda x: x["gen_count"], reverse=True)
+
+    # most/least
+    most_exp = None
+    cheapest = None
+    if providers:
+        sorted_cost = sorted(providers, key=lambda x: x["cost_per_gen"], reverse=True)
+        if sorted_cost:
+            most_exp = {"id": sorted_cost[0]["id"], "name": sorted_cost[0]["name"], "cost_per_gen": float(sorted_cost[0]["cost_per_gen"])}
+            cheapest = {"id": sorted_cost[-1]["id"], "name": sorted_cost[-1]["name"], "cost_per_gen": float(sorted_cost[-1]["cost_per_gen"])}
+    highest_usage = None
+    if provider_breakdown:
+        hu = max(provider_breakdown, key=lambda x: x["gen_count"]) if provider_breakdown else None
+        if hu and hu["gen_count"] > 0:
+            highest_usage = {"id": hu["id"], "name": hu["name"], "gen_count": hu["gen_count"]}
+
+    return {
+        "period": period_label,
+        "days": days,
+        "totals": {
+            "total_cost": total_cost,
+            "total_revenue": total_revenue,
+            "total_profit": total_profit,
+            "total_gens": total_gens,
+            "total_success": total_success,
+            "total_failed": total_failed,
+            "avg_cost_per_gen": avg_cost_per_gen,
+            "deposit_revenue": float(dep_total or 0),
+            "order_revenue": float(ord_total or 0),
+            "most_expensive_provider": most_exp,
+            "cheapest_provider": cheapest,
+            "highest_usage_provider": highest_usage,
+        },
+        "daily": daily_result,
+        "provider_breakdown": provider_breakdown,
+        "model_breakdown": model_breakdown,
+    }
+
+# ---- Backup & Restore 1-Click (Phase4 Task12) ----
+def _backup_dict(r) -> dict:
+    d = dict(r)
+    try:
+        d["size_bytes"] = int(d.get("size_bytes") or 0)
+    except Exception:
+        d["size_bytes"] = 0
+    d["size_human"] = _human_size(d["size_bytes"])
+    cs = d.get("checksum") or ""
+    d["checksum_short"] = cs[:12] if cs else ""
+    sp = d.get("storage_path") or ""
+    if sp:
+        try:
+            p = Path(sp)
+            d["file_exists"] = p.exists() and p.is_file()
+        except Exception:
+            d["file_exists"] = False
+    else:
+        d["file_exists"] = False
+    if isinstance(d.get("meta"), str):
+        try:
+            d["meta"] = _json_std.loads(d["meta"])
+        except Exception:
+            d["meta"] = {}
+    if d.get("meta") is None:
+        d["meta"] = {}
+    return d
+
+async def _create_pg_dump_internal(filename: str, type_: str, created_by: str = "admin") -> dict:
+    _ensure_backup_dir()
+    filename = filename.strip()
+    if not _is_safe_filename(filename):
+        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"backup_{ts}.sql.gz"
+    target_path = _backup_file_path(filename)
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            "INSERT INTO backup_history (filename, size_bytes, type, status, storage_path, created_by, meta) VALUES ($1,0,$2,'in_progress',$3,$4,'{}'::jsonb) ON CONFLICT (filename) DO UPDATE SET status='in_progress', size_bytes=0, error_message=NULL, completed_at=NULL RETURNING *",
+            filename, type_, str(target_path), created_by
+        )
+        backup_id = row["id"]
+    try:
+        db_url = os.environ.get("DATABASE_URL", "")
+        if not db_url:
+            raise RuntimeError("DATABASE_URL not set")
+        def _do_dump():
+            proc = subprocess.Popen(
+                ["pg_dump", db_url],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=os.environ.copy(),
+            )
+            try:
+                with gzip.open(target_path, "wb", compresslevel=6) as gz:
+                    assert proc.stdout is not None
+                    while True:
+                        chunk = proc.stdout.read(1048576)
+                        if not chunk:
+                            break
+                        gz.write(chunk)
+                _, stderr = proc.communicate(timeout=300)
+                if proc.returncode != 0:
+                    err_txt = stderr.decode("utf-8", errors="ignore")[:2000] if stderr else f"pg_dump exit {proc.returncode}"
+                    raise RuntimeError(err_txt)
+            finally:
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                except Exception:
+                    pass
+        await asyncio.to_thread(_do_dump)
+        size = 0
+        try:
+            size = target_path.stat().st_size
+        except Exception:
+            size = 0
+        checksum = await asyncio.to_thread(_calculate_checksum, target_path)
+        async with _pool.acquire() as con:
+            upd = await con.fetchrow(
+                "UPDATE backup_history SET size_bytes=$1, checksum=$2, status='completed', completed_at=now(), error_message=NULL WHERE id=$3 RETURNING *",
+                size, checksum, backup_id
+            )
+        await audit_log("backup_create_ok", str(backup_id), f"{filename} size={size} checksum={checksum[:12]}")
+        return _backup_dict(upd) if upd else {}
+    except Exception as e:
+        err_msg = str(e)[:2000]
+        try:
+            if target_path.exists():
+                target_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        async with _pool.acquire() as con:
+            try:
+                await con.execute("UPDATE backup_history SET status='failed', error_message=$1, completed_at=now() WHERE id=$2", err_msg, backup_id)
+            except Exception:
+                pass
+        await audit_log("backup_create_fail", str(backup_id), err_msg[:500])
+        raise HTTPException(status_code=500, detail=f"Backup gagal: {err_msg[:500]}") from e
+
+async def _restore_pg_internal(backup_id: int, storage_path: str, filename: str) -> dict:
+    _ensure_backup_dir()
+    p = Path(storage_path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="File backup tidak ditemukan di disk")
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        raise HTTPException(status_code=500, detail="DATABASE_URL not set")
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE backup_history SET status='restoring', error_message=NULL WHERE id=$1", backup_id)
+    try:
+        def _do_restore():
+            sp = str(p)
+            if sp.endswith(".sql.gz") or sp.endswith(".gz"):
+                proc_psql = subprocess.Popen(
+                    ["psql", db_url, "-v", "ON_ERROR_STOP=1", "--quiet"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=os.environ.copy(),
+                )
+                try:
+                    with gzip.open(p, "rb") as gz:
+                        assert proc_psql.stdin is not None
+                        while True:
+                            chunk = gz.read(1048576)
+                            if not chunk:
+                                break
+                            proc_psql.stdin.write(chunk)
+                    proc_psql.stdin.close()
+                    stdout, stderr = proc_psql.communicate(timeout=600)
+                    if proc_psql.returncode != 0:
+                        err = (stderr or b"").decode("utf-8", errors="ignore")[:3000]
+                        raise RuntimeError(err or f"psql exit {proc_psql.returncode}")
+                finally:
+                    try:
+                        if proc_psql.poll() is None:
+                            proc_psql.kill()
+                    except Exception:
+                        pass
+            elif sp.endswith(".dump"):
+                proc = subprocess.run(
+                    ["pg_restore", "--dbname", db_url, "--clean", "--if-exists", "--no-owner", sp],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    env=os.environ.copy(),
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError((proc.stderr or proc.stdout or f"pg_restore exit {proc.returncode}")[:3000])
+            elif sp.endswith(".sql"):
+                proc_psql = subprocess.Popen(
+                    ["psql", db_url, "-v", "ON_ERROR_STOP=1", "--quiet"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=os.environ.copy(),
+                )
+                try:
+                    assert proc_psql.stdin is not None
+                    with open(p, "rb") as src:
+                        shutil.copyfileobj(src, proc_psql.stdin, length=1048576)
+                    proc_psql.stdin.close()
+                    stdout, stderr = proc_psql.communicate(timeout=600)
+                    if proc_psql.returncode != 0:
+                        err = (stderr or b"").decode("utf-8", errors="ignore")[:3000]
+                        raise RuntimeError(err or f"psql exit {proc_psql.returncode}")
+                finally:
+                    try:
+                        if proc_psql.poll() is None:
+                            proc_psql.kill()
+                    except Exception:
+                        pass
+            else:
+                raise RuntimeError("Unsupported file extension for restore")
+        await asyncio.to_thread(_do_restore)
+        try:
+            async with _pool.acquire() as con:
+                await con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS backup_history (
+                        id SERIAL PRIMARY KEY,
+                        filename TEXT UNIQUE NOT NULL,
+                        size_bytes BIGINT DEFAULT 0,
+                        type TEXT DEFAULT 'manual',
+                        status TEXT DEFAULT 'completed',
+                        storage_path TEXT,
+                        checksum TEXT,
+                        created_by TEXT,
+                        created_at TIMESTAMPTZ DEFAULT now(),
+                        completed_at TIMESTAMPTZ,
+                        error_message TEXT,
+                        meta JSONB DEFAULT '{}'::jsonb
+                    );
+                    """
+                )
+                await con.execute("CREATE INDEX IF NOT EXISTS idx_backup_history_created ON backup_history(created_at DESC);")
+                exists = await con.fetchrow("SELECT id FROM backup_history WHERE filename=$1", filename)
+                if not exists:
+                    size_b = 0
+                    try:
+                        size_b = p.stat().st_size
+                    except Exception:
+                        size_b = 0
+                    checksum = await asyncio.to_thread(_calculate_checksum, p)
+                    await con.execute(
+                        "INSERT INTO backup_history (filename, size_bytes, type, status, storage_path, checksum, created_by, completed_at, meta) VALUES ($1,$2,'manual','completed',$3,$4,$5, now(), '{}'::jsonb) ON CONFLICT (filename) DO UPDATE SET status='completed', completed_at=now()",
+                        filename, size_b, str(p), checksum, "admin:restore"
+                    )
+                else:
+                    await con.execute("UPDATE backup_history SET status='completed', completed_at=now(), error_message=NULL WHERE filename=$1", filename)
+        except Exception as re_e:
+            print(f"warn restore re-sync backup_history: {re_e}")
+        await audit_log("backup_restore_ok", str(backup_id), f"{filename} restored")
+        return {"ok": True, "restored": filename}
+    except Exception as e:
+        err_msg = str(e)[:3000]
+        try:
+            async with _pool.acquire() as con:
+                await con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS backup_history (
+                        id SERIAL PRIMARY KEY,
+                        filename TEXT UNIQUE NOT NULL,
+                        size_bytes BIGINT DEFAULT 0,
+                        type TEXT DEFAULT 'manual',
+                        status TEXT DEFAULT 'completed',
+                        storage_path TEXT,
+                        checksum TEXT,
+                        created_by TEXT,
+                        created_at TIMESTAMPTZ DEFAULT now(),
+                        completed_at TIMESTAMPTZ,
+                        error_message TEXT,
+                        meta JSONB DEFAULT '{}'::jsonb
+                    );
+                    """
+                )
+                await con.execute("UPDATE backup_history SET status='failed', error_message=$1, completed_at=now() WHERE id=$2", err_msg[:2000], backup_id)
+        except Exception:
+            pass
+        await audit_log("backup_restore_fail", str(backup_id), err_msg[:500])
+        raise HTTPException(status_code=500, detail=f"Restore gagal: {err_msg[:800]}") from e
+
+class BackupCreateBody(BaseModel):
+    type: str = Field(default="manual", max_length=10)
+    @field_validator("type")
+    @classmethod
+    def val_type(cls, v):
+        vv = (v or "manual").strip().lower()
+        if vv not in ("manual","auto"):
+            vv = "manual"
+        return vv
+
+class BackupRestoreBody(BaseModel):
+    confirm: bool = Field(..., description="Must be true to confirm restore")
+    create_safety_backup: bool = Field(default=True, description="Create safety backup before restore")
+
+@app.get("/api/backup/list")
+async def backup_list(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT * FROM backup_history ORDER BY created_at DESC LIMIT 100")
+    return {"backups": [_backup_dict(r) for r in rows], "total": len(rows)}
+
+@app.get("/api/backup/stats")
+async def backup_stats(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        total = await con.fetchval("SELECT count(*) FROM backup_history") or 0
+        total_size = await con.fetchval("SELECT COALESCE(SUM(size_bytes),0) FROM backup_history WHERE status='completed'") or 0
+        last_row = await con.fetchrow("SELECT * FROM backup_history WHERE status='completed' ORDER BY created_at DESC LIMIT 1")
+        pending = await con.fetchval("SELECT count(*) FROM backup_history WHERE status IN ('in_progress','restoring')") or 0
+        failed = await con.fetchval("SELECT count(*) FROM backup_history WHERE status='failed'") or 0
+    last_backup = _backup_dict(last_row) if last_row else None
+    needs_auto = False
+    if last_row:
+        try:
+            age = (_dt.datetime.now(_dt.timezone.utc) - last_row["created_at"]).total_seconds() / 3600
+            needs_auto = age > 24
+        except Exception:
+            needs_auto = True
+    else:
+        needs_auto = True
+    last_ago = None
+    if last_row:
+        try:
+            last_ago = (_dt.datetime.now(_dt.timezone.utc) - last_row["created_at"]).total_seconds() / 3600
+        except Exception:
+            last_ago = None
+    return {
+        "total_backups": int(total),
+        "total_size_bytes": int(total_size),
+        "total_size_human": _human_size(total_size),
+        "last_backup": last_backup,
+        "pending_count": int(pending),
+        "failed_count": int(failed),
+        "auto_backup_enabled": True,
+        "needs_auto_backup": needs_auto,
+        "backup_dir": str(BACKUP_DIR),
+        "last_backup_ago_hours": last_ago,
+    }
+
+@app.post("/api/backup/create")
+async def backup_create(body: BackupCreateBody, _: bool = Depends(require_auth)):
+    if _backup_lock.locked():
+        raise HTTPException(status_code=429, detail="Backup sedang berjalan, tunggu selesai")
+    if _restore_lock.locked():
+        raise HTTPException(status_code=429, detail="Restore sedang berjalan, tunggu selesai")
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = "auto" if body.type == "auto" else "backup"
+    filename = f"{prefix}_{ts}.sql.gz"
+    _ensure_backup_dir()
+    counter = 0
+    base_name = filename
+    while (BACKUP_DIR / filename).exists():
+        counter += 1
+        stem = base_name.replace(".sql.gz", "")
+        filename = f"{stem}_{counter}.sql.gz"
+    async with _backup_lock:
+        try:
+            row = await _create_pg_dump_internal(filename, body.type, created_by="admin")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)[:800])
+    return {"ok": True, "backup": row}
+
+@app.get("/api/backup/{backup_id}/download")
+async def backup_download(backup_id: int, _: bool = Depends(require_auth)):
+    if backup_id < 1:
+        raise HTTPException(status_code=400, detail="Invalid id")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM backup_history WHERE id=$1", backup_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Backup tidak ditemukan")
+    storage_path = row["storage_path"] or ""
+    filename = row["filename"]
+    if storage_path:
+        target = Path(storage_path)
+        if not target.exists() or not target.is_file():
+            fb = BACKUP_DIR / filename
+            if fb.exists():
+                target = fb
+            else:
+                raise HTTPException(status_code=404, detail="File tidak ditemukan di disk")
+    else:
+        target = BACKUP_DIR / filename
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="File tidak ditemukan")
+    try:
+        p = target.resolve()
+        base = BACKUP_DIR.resolve()
+        sp = str(p)
+        sb = str(base)
+        if sb not in sp and not sp.startswith("/tmp"):
+            if not sp.startswith(sb):
+                raise HTTPException(status_code=403, detail="Path not allowed")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    await audit_log("backup_download", str(backup_id), filename)
+    return FileResponse(str(target), filename=filename, media_type="application/gzip", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+@app.delete("/api/backup/{backup_id}")
+async def backup_delete(backup_id: int, _: bool = Depends(require_auth)):
+    if backup_id < 1:
+        raise HTTPException(status_code=400, detail="Invalid id")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM backup_history WHERE id=$1", backup_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Backup tidak ditemukan")
+        if row["status"] in ("in_progress","restoring"):
+            raise HTTPException(status_code=400, detail="Tidak bisa hapus backup yang sedang berjalan")
+        await con.execute("DELETE FROM backup_history WHERE id=$1", backup_id)
+    try:
+        fp = row["storage_path"] or str(BACKUP_DIR / row["filename"])
+        pp = Path(fp)
+        if pp.exists() and pp.is_file():
+            rp = str(pp.resolve())
+            base_s = str(BACKUP_DIR.resolve())
+            if rp.startswith(base_s) or rp.startswith("/tmp"):
+                pp.unlink(missing_ok=True)
+    except Exception:
+        pass
+    await audit_log("backup_delete", str(backup_id), row["filename"])
+    return {"ok": True, "deleted": row["filename"]}
+
+@app.post("/api/backup/{backup_id}/restore")
+async def backup_restore(backup_id: int, body: BackupRestoreBody, _: bool = Depends(require_auth)):
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Konfirmasi restore wajib")
+    if _backup_lock.locked():
+        raise HTTPException(status_code=429, detail="Backup sedang berjalan, tunggu selesai")
+    if _restore_lock.locked():
+        raise HTTPException(status_code=429, detail="Restore sedang berjalan")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM backup_history WHERE id=$1", backup_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Backup tidak ditemukan")
+    if row["status"] == "in_progress":
+        raise HTTPException(status_code=400, detail="Backup masih in_progress, tidak bisa restore")
+    storage_path = row["storage_path"] or str(BACKUP_DIR / row["filename"])
+    p = Path(storage_path)
+    if not p.exists():
+        alt = BACKUP_DIR / row["filename"]
+        if alt.exists():
+            storage_path = str(alt)
+            p = alt
+        else:
+            raise HTTPException(status_code=404, detail="File backup tidak ada di disk")
+    if body.create_safety_backup:
+        try:
+            ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            safety_name = f"backup_safety_before_restore_{ts}.sql.gz"
+            async with _backup_lock:
+                await _create_pg_dump_internal(safety_name, "auto", created_by="safety_before_restore")
+        except Exception as se:
+            await audit_log("backup_safety_fail", str(backup_id), str(se)[:500])
+    async with _restore_lock:
+        try:
+            result = await _restore_pg_internal(backup_id, storage_path, row["filename"])
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)[:1000])
+    try:
+        await _ensure_tables()
+    except Exception:
+        pass
+    await audit_log("backup_restore", str(backup_id), row["filename"])
+    return result
+
+@app.post("/api/backup/upload")
+async def backup_upload(file: UploadFile = File(...), _: bool = Depends(require_auth)):
+    max_bytes = 500 * 1024 * 1024
+    _ensure_backup_dir()
+    orig_name = (file.filename or "").strip()
+    if not orig_name:
+        raise HTTPException(status_code=400, detail="Nama file kosong")
+    safe_name = orig_name.replace("..", "").replace("/", "_").replace("\\", "_").strip()
+    low = safe_name.lower()
+    if not (low.endswith(".sql.gz") or low.endswith(".dump") or low.endswith(".sql") or low.endswith(".gz")):
+        raise HTTPException(status_code=400, detail="Format harus .sql.gz, .dump, .sql, atau .gz")
+    target = BACKUP_DIR / safe_name
+    counter = 0
+    base = safe_name
+    while target.exists():
+        counter += 1
+        if ".sql.gz" in base:
+            stem = base.replace(".sql.gz", "")
+            safe_name = f"{stem}_{counter}.sql.gz"
+        else:
+            parts = base.rsplit(".", 1)
+            safe_name = f"{parts[0]}_{counter}.{parts[1]}" if len(parts) == 2 else f"{base}_{counter}"
+        target = BACKUP_DIR / safe_name
+    size = 0
+    try:
+        with open(target, "wb") as out:
+            while True:
+                chunk = await file.read(1048576)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    out.close()
+                    try:
+                        target.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise HTTPException(status_code=400, detail="File terlalu besar >500MB")
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Gagal simpan upload: {e}"[:500])
+    checksum = await asyncio.to_thread(_calculate_checksum, target)
+    async with _pool.acquire() as con:
+        try:
+            row = await con.fetchrow(
+                "INSERT INTO backup_history (filename, size_bytes, type, status, storage_path, checksum, created_by, completed_at, meta) VALUES ($1,$2,'upload','completed',$3,$4,'admin', now(), '{}'::jsonb) RETURNING *",
+                safe_name, size, str(target), checksum
+            )
+        except Exception as e:
+            if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_name = f"upload_{ts}_{safe_name}"
+                target2 = BACKUP_DIR / safe_name
+                try:
+                    target.rename(target2)
+                    target = target2
+                except Exception:
+                    pass
+                row = await con.fetchrow(
+                    "INSERT INTO backup_history (filename, size_bytes, type, status, storage_path, checksum, created_by, completed_at, meta) VALUES ($1,$2,'upload','completed',$3,$4,'admin', now(), '{}'::jsonb) RETURNING *",
+                    safe_name, size, str(target), checksum
+                )
+            else:
+                raise
+    await audit_log("backup_upload", safe_name, f"size={size}")
+    return {"ok": True, "backup": _backup_dict(row)}
+
+@app.post("/api/backup/evaluate-auto")
+async def backup_evaluate_auto(force: bool = False, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        last_row = await con.fetchrow("SELECT * FROM backup_history WHERE status='completed' ORDER BY created_at DESC LIMIT 1")
+    needs = False
+    reason = ""
+    if not last_row:
+        needs = True
+        reason = "Belum ada backup"
+    else:
+        try:
+            age_h = (_dt.datetime.now(_dt.timezone.utc) - last_row["created_at"]).total_seconds() / 3600
+            if age_h > 24:
+                needs = True
+                reason = f"Last backup {age_h:.1f}h lalu >24h"
+            else:
+                reason = f"Last backup {age_h:.1f}h lalu masih fresh"
+        except Exception:
+            needs = True
+            reason = "Gagal hitung umur backup, buat baru"
+    if not needs and not force:
+        return {"ok": True, "created": False, "reason": reason, "last_backup": _backup_dict(last_row) if last_row else None}
+    if _backup_lock.locked() or _restore_lock.locked():
+        raise HTTPException(status_code=429, detail="Backup/restore sedang berjalan")
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"auto_{ts}.sql.gz"
+    _ensure_backup_dir()
+    counter = 0
+    base = filename
+    while (BACKUP_DIR / filename).exists():
+        counter += 1
+        stem = base.replace(".sql.gz", "")
+        filename = f"{stem}_{counter}.sql.gz"
+    async with _backup_lock:
+        row = await _create_pg_dump_internal(filename, "auto", created_by="auto_evaluate")
+    await audit_log("backup_auto", str(row.get("id", "?")), filename)
+    return {"ok": True, "created": True, "reason": reason, "backup": row}
+

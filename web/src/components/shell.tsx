@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
-import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X, Wallet, ArrowDownToLine, Gift, Bot, ShieldCheck, ScrollText, Server, HeartPulse, FileText, Palette, Command, Route, Link2, Zap, Bell, ShieldAlert } from "lucide-react";
+import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X, Wallet, ArrowDownToLine, Gift, Bot, ShieldCheck, ScrollText, Server, HeartPulse, FileText, Palette, Command, Route, Link2, Zap, Bell, ShieldAlert, DollarSign, CalendarRange, HardDrive } from "lucide-react";
 import { cn, api } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useLang, FlagID, FlagEN } from "@/lib/i18n";
@@ -17,10 +17,13 @@ const groups = [
       { href: "/system", labelKey: "nav.system", icon: Server },
       { href: "/health", labelKey: "nav.health", icon: HeartPulse },
       { href: "/failover", labelKey: "nav.failover", icon: Route },
+      { href: "/cost", labelKey: "nav.cost", icon: DollarSign },
       { href: "/alerts", labelKey: "nav.alerts", icon: Bell },
       { href: "/moderation", labelKey: "nav.moderation", icon: ShieldAlert },
       { href: "/users", labelKey: "nav.users", icon: Users },
       { href: "/broadcast", labelKey: "nav.broadcast", icon: Radio },
+      { href: "/broadcast-sched", labelKey: "nav.broadcast_sched", icon: CalendarRange },
+      { href: "/backup", labelKey: "nav.backup", icon: HardDrive },
       { href: "/referral", labelKey: "nav.referral", icon: Gift },
       { href: "/models", labelKey: "nav.models", icon: Bot },
       { href: "/styles-manage", labelKey: "nav.styles_manage", icon: Palette },
