@@ -274,11 +274,9 @@ export default function BackupPage() {
           <Button size="sm" onClick={() => handleCreate("manual")} disabled={creating || uploading} className="h-8 text-xs"><Database className={`h-4 w-4 ${creating ? "animate-spin" : ""}`} />{creating ? (lang === "id" ? "Membuat..." : "Creating...") : (lang === "id" ? "Buat Backup" : "Create Backup")}</Button>
           <label className="inline-flex">
             <input ref={fileInputRef} type="file" accept=".sql.gz,.gz,.dump,.sql" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f); }} />
-            <Button variant="secondary" size="sm" disabled={uploading} className="h-8 text-xs" asChild>
-              <span onClick={() => fileInputRef.current?.click()} className="cursor-pointer flex items-center gap-1.5">
+            <span onClick={() => fileInputRef.current?.click()} className={`inline-flex h-8 items-center gap-1.5 rounded-md bg-secondary text-secondary-foreground px-3 text-xs font-medium cursor-pointer hover:opacity-80 ${uploading ? "opacity-50 pointer-events-none" : ""}`}>
                 <UploadCloud className={`h-4 w-4 ${uploading ? "animate-spin" : ""}`} />{uploading ? (lang === "id" ? "Upload..." : "Uploading...") : (lang === "id" ? "Upload Backup" : "Upload Backup")}
               </span>
-            </Button>
           </label>
         </div>
       </div>
