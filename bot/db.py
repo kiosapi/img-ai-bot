@@ -689,7 +689,7 @@ async def check_and_consume_multi(user_id: int, free_fallback: int, count: int =
             remaining_daily = max(0, limit - cur)
             if remaining_daily >= count:
                 new_row = await con.fetchrow(
-                    "UPDATE usage_daily SET count = count + $2 WHERE user_id=$1 AND day=$2 RETURNING count",
+                    "UPDATE usage_daily SET count = count + $2 WHERE user_id=$1 AND day=$3 RETURNING count",
                     user_id, count, tday,
                 )
                 return True, new_row["count"], limit, False
@@ -703,7 +703,7 @@ async def check_and_consume_multi(user_id: int, free_fallback: int, count: int =
                 # consume remaining daily first
                 if remaining_daily > 0:
                     await con.execute(
-                        "UPDATE usage_daily SET count = count + $2 WHERE user_id=$1 AND day=$2",
+                        "UPDATE usage_daily SET count = count + $2 WHERE user_id=$1 AND day=$3",
                         user_id, remaining_daily, tday,
                     )
                 await con.execute(
