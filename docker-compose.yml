@@ -33,7 +33,7 @@ services:
       REQUIRED_CHANNEL: ${REQUIRED_CHANNEL}
       ADMIN_IDS: ${ADMIN_IDS}
       DEFAULT_DAILY_LIMIT: ${DEFAULT_DAILY_LIMIT}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:***@postgres:5432/${POSTGRES_DB}
 
   api:
     build: ./api
@@ -42,7 +42,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:***@postgres:5432/${POSTGRES_DB}
       ADMIN_USER: ${ADMIN_USER}
       ADMIN_PASS: ${ADMIN_PASS}
       DASH_SECRET: ${DASH_SECRET}
@@ -58,6 +58,12 @@ services:
       REQUIRED_CHANNEL: ${REQUIRED_CHANNEL}
       ADMIN_IDS: ${ADMIN_IDS}
       DEFAULT_DAILY_LIMIT: ${DEFAULT_DAILY_LIMIT}
+      LOG_CONTAINER_BOT: imgbot-bot-1,imgbot_bot_1,bot
+      LOG_CONTAINER_API: imgbot-api-1,imgbot_api_1,api
+      LOG_CONTAINER_POSTGRES: imgbot-postgres-1,imgbot_postgres_1,postgres
+      LOG_CONTAINER_WEB: imgbot-web-1,imgbot_web_1,web
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   web:
     build: ./web

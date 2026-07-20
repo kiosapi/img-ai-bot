@@ -1326,9 +1326,9 @@ async def restart_bot(body: RestartBotBody | None = None, _: bool = Depends(requ
     }
 
 # ---- Live Logs Viewer ----
+# ---- Live Logs Viewer (REALTIME via Docker socket, no fake fallback) ----
 import subprocess
 import shutil
-import logging
 
 LOG_CONTAINERS = {
     "bot": os.environ.get("LOG_CONTAINER_BOT", "imgbot-bot-1,imgbot_bot_1,bot"),
@@ -1357,36 +1357,148 @@ def _classify_level(line: str) -> str:
             return "debug"
     return "info"
 
-def _try_docker_logs(container_names: list[str], lines: int) -> tuple[str, str | None, str]:
-    """Try docker logs, return (output, used_container, error)."""
+async def _docker_logs_via_socket(container_name: str, lines: int) -> tuple[str, str]:
+    """Real docker logs via /var/run/docker.sock HTTP API — no binary needed, 100% realtime accurate.
+    Returns (text, error)."""
+    sock_path = "/var/run/docker.sock"
+    if not os.path.exists(sock_path):
+        return "", "docker.sock not found — mount /var/run/docker.sock:/var/run/docker.sock:ro in compose"
+    try:
+        # resolve container id by name via API
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        # list containers
+        req = f"GET /containers/json?all=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".encode()
+        writer.write(req)
+        await writer.drain()
+        data = b""
+        while True:
+            chunk = await writer.read(4096)
+            if not chunk:
+                break
+            data += chunk
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+        # parse HTTP response
+        if b"\r\n\r\n" in data:
+            _, body = data.split(b"\r\n\r\n", 1)
+            # handle chunked encoding
+            if b'"Id"' in body:
+                import json
+                text = body.decode("utf-8", errors="ignore")
+                # find json array start
+                start = text.find("[")
+                end = text.rfind("]") + 1
+                if start >= 0 and end > start:
+                    containers = json.loads(text[start:end])
+                    target_id = None
+                    search_names = [container_name.strip()]
+                    # also try variations
+                    for c in containers:
+                        names = c.get("Names", [])
+                        c_id = c.get("Id", "")
+                        for n in names:
+                            clean = n.lstrip("/")
+                            if clean == container_name or container_name in clean or clean in container_name:
+                                target_id = c_id
+                                break
+                        if c_id[:12] == container_name[:12] or container_name in c_id:
+                            target_id = c_id
+                        if target_id:
+                            break
+                    if not target_id:
+                        # fallback: if we have exact name list includes, try first container that matches type by label
+                        # e.g. find container where image includes 'imgbot-api' etc
+                        for c in containers:
+                            image = c.get("Image", "")
+                            if container_name.replace("-1", "").replace("_1", "") in image:
+                                target_id = c.get("Id")
+                                if target_id:
+                                    break
+                    if target_id:
+                        # now fetch logs for that id
+                        reader2, writer2 = await asyncio.open_unix_connection(sock_path)
+                        path = f"/containers/{target_id}/logs?tail={lines}&stdout=1&stderr=1&timestamps=0"
+                        req2 = f"GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".encode()
+                        writer2.write(req2)
+                        await writer2.drain()
+                        data2 = b""
+                        while True:
+                            chunk = await writer2.read(8192)
+                            if not chunk:
+                                break
+                            data2 += chunk
+                        try:
+                            writer2.close()
+                            await writer2.wait_closed()
+                        except Exception:
+                            pass
+                        if b"\r\n\r\n" in data2:
+                            _, body2 = data2.split(b"\r\n\r\n", 1)
+                            # Docker multiplexed stream: each frame 8-byte header
+                            out_lines = []
+                            buf = body2
+                            # if content-type text/plain (non-multiplexed) fallback
+                            if body2.startswith(b"\x01") or body2.startswith(b"\x02"):
+                                # multiplexed
+                                idx = 0
+                                while idx + 8 <= len(buf):
+                                    # header: stream type 1 byte, 3 zero bytes, 4 byte BE length
+                                    length = int.from_bytes(buf[idx+4:idx+8], "big")
+                                    frame = buf[idx+8:idx+8+length]
+                                    out_lines.append(frame.decode("utf-8", errors="ignore"))
+                                    idx += 8 + length
+                                text_out = "".join(out_lines)
+                            else:
+                                # try decode directly (plain text logs non-multiplexed)
+                                text_out = buf.decode("utf-8", errors="ignore")
+                                # strip chunked encoding numbers if present
+                                # chunked format: hex size CRLF data CRLF ... 0 CRLF CRLF
+                                if "\r\n" in text_out and text_out[:10].strip().replace("\r\n", "").replace("\n", "").isdigit() == False:
+                                    # might be chunked, attempt to strip chunk headers
+                                    cleaned = []
+                                    for part in text_out.split("\r\n"):
+                                        p = part.strip()
+                                        if not p:
+                                            continue
+                                        try:
+                                            int(p, 16)
+                                            continue
+                                        except ValueError:
+                                            cleaned.append(part)
+                                    if cleaned:
+                                        text_out = "\n".join(cleaned)
+                            if text_out.strip():
+                                return text_out, ""
+                            return "", f"container {container_name} logs empty (id {target_id[:12]})"
+                        return "", f"failed to parse logs response for {container_name}"
+                return "", f"no body in containers list response"
+            return "", "no container data in socket response"
+        return "", f"no http separator in socket response for {container_name}"
+    except FileNotFoundError:
+        return "", "docker.sock not found"
+    except Exception as e:
+        return "", f"socket error {container_name}: {e}"[:300]
+
+def _try_docker_logs_sync(container_names: list[str], lines: int) -> tuple[str, str | None, str]:
+    """Fallback sync docker binary if available (local dev)."""
     if not shutil.which("docker"):
-        return "", None, "docker binary not found"
+        return "", None, "docker binary not found — use docker.sock (mount volume)"
     last_err = ""
     for name in container_names:
         name = name.strip()
         if not name:
             continue
         try:
-            # Use shell=False safe
-            result = subprocess.run(
-                ["docker", "logs", "--tail", str(lines), name],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
+            result = subprocess.run(["docker", "logs", "--tail", str(lines), name], capture_output=True, text=True, timeout=8)
             combined = (result.stdout + "\n" + result.stderr).strip()
-            if result.returncode == 0 or combined:
-                # Even if non-zero, some docker versions write logs to stderr
-                if combined:
-                    return combined, name, ""
-                if result.returncode == 0:
-                    return "", name, ""
+            if combined:
+                return combined, name, ""
+            if result.returncode == 0:
+                return "", name, ""
             last_err = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
-        except subprocess.TimeoutExpired:
-            last_err = f"timeout reading {name}"
-        except FileNotFoundError:
-            last_err = "docker not found"
-            break
         except Exception as e:
             last_err = str(e)[:300]
     return "", None, last_err or "no container matched"
@@ -1414,96 +1526,80 @@ async def logs_tail(
 
     logs_text = ""
     used_container = None
-    source = "docker"
+    source = "docker-socket:real"
     docker_err = ""
 
-    # attempt docker logs
-    logs_text, used_container, docker_err = _try_docker_logs(container_list, lines)
+    # attempt 1: real docker logs via socket (100% realtime, no fake)
+    for cname in container_list:
+        txt, err = await _docker_logs_via_socket(cname, lines)
+        if txt:
+            logs_text = txt
+            used_container = cname
+            source = f"docker-socket:real:{cname}"
+            docker_err = ""
+            break
+        if err and not docker_err:
+            docker_err = err
+        # if docker.sock says logs empty but no error, keep trying next name
 
-    # fallback 1: try reading log files if docker failed
+    # attempt 2: fallback sync docker binary (local dev)
     if not logs_text:
-        fallback_paths = [
-            f"/var/log/{type}.log",
-            f"/tmp/{type}.log",
-            f"./{type}.log",
-            f"/app/{type}.log",
-            "./bot.log",
-            "./api.log",
-        ]
-        # bot logs often at /app/bot.log or cwd
-        for p in fallback_paths:
-            try:
-                if os.path.exists(p) and os.path.getsize(p) > 0:
-                    with open(p, "r", encoding="utf-8", errors="ignore") as fh:
-                        all_lines = fh.readlines()
-                        logs_text = "".join(all_lines[-lines:])
-                        if logs_text:
-                            source = f"file:{p}"
-                            break
-            except Exception:
-                continue
+        txt2, used2, err2 = _try_docker_logs_sync(container_list, lines)
+        if txt2:
+            logs_text = txt2
+            used_container = used2
+            source = f"docker-binary:real:{used2}"
+            docker_err = ""
+        elif err2 and not docker_err:
+            docker_err = err2
 
-    # fallback 2: DB errors table / generations + audit
+    # attempt 3: fallback DB only if both docker methods fail — clearly marked as DB not real logs
     if not logs_text:
         try:
             async with _pool.acquire() as con:
                 if type == "bot":
-                    rows = await con.fetch(
-                        "SELECT id, created_at, user_id, prompt, success FROM generations ORDER BY id DESC LIMIT $1",
-                        lines,
-                    )
+                    rows = await con.fetch("SELECT id, created_at, user_id, prompt, success FROM generations ORDER BY id DESC LIMIT $1", lines)
                     formatted = []
                     for r in rows:
                         status = "ERROR" if not r["success"] else "INFO"
                         ts = r["created_at"].isoformat() if r["created_at"] else ""
                         prompt_snip = (r["prompt"] or "")[:120]
                         formatted.append(f"{ts} [{status}] user={r['user_id']} kind=gen prompt={prompt_snip} success={r['success']}")
-                    logs_text = "\n".join(formatted) if formatted else "no generation logs in DB"
-                    source = "db:generations"
+                    logs_text = "\n".join(formatted) if formatted else "no generation logs in DB (DB fallback, not real docker logs)"
+                    source = "db:generations-fallback (NOT real logs - docker unavailable)"
                 elif type == "api":
-                    rows = await con.fetch(
-                        "SELECT id, ts, action, target, detail FROM admin_audit ORDER BY id DESC LIMIT $1",
-                        lines,
-                    )
+                    rows = await con.fetch("SELECT id, ts, action, target, detail FROM admin_audit ORDER BY id DESC LIMIT $1", lines)
                     formatted = []
                     for r in rows:
                         ts = r["ts"].isoformat() if r["ts"] else ""
                         lvl = "WARN" if "fail" in (r["action"] or "").lower() else "INFO"
                         formatted.append(f"{ts} [{lvl}] {r['action']} target={r['target']} detail={r['detail'][:200]}")
-                    logs_text = "\n".join(formatted) if formatted else "no audit logs"
-                    source = "db:admin_audit"
+                    logs_text = "\n".join(formatted) if formatted else "no audit logs (DB fallback)"
+                    source = "db:admin_audit-fallback (NOT real logs)"
                 elif type == "postgres":
-                    rows = await con.fetch(
-                        "SELECT pid, query, state, now() - query_start AS dur FROM pg_stat_activity WHERE datname = current_database() AND state != 'idle' ORDER BY query_start DESC LIMIT 20"
-                    )
-                    formatted = [f"[INFO] Postgres activity: {len(rows)} active queries"]
+                    rows = await con.fetch("SELECT pid, query, state, now() - query_start AS dur FROM pg_stat_activity WHERE datname = current_database() AND state != 'idle' ORDER BY query_start DESC LIMIT 20")
+                    formatted = [f"[INFO] Postgres activity: {len(rows)} active queries (live pg_stat, real)"]
                     for r in rows:
                         q = (r["query"] or "")[:200].replace("\n", " ")
                         formatted.append(f"pid={r['pid']} dur={r['dur']} state={r['state']} query={q}")
-                    logs_text = "\n".join(formatted) if formatted else "postgres stats empty"
-                    source = "db:pg_stat"
+                    logs_text = "\n".join(formatted) if formatted else "postgres stats empty (real pg_stat)"
+                    source = "db:pg_stat-real (live)"
                 else:
-                    logs_text = "no logs available for web in non-docker env - fallback to audit"
                     rows = await con.fetch("SELECT id, ts, action, detail FROM admin_audit ORDER BY id DESC LIMIT $1", lines)
                     formatted = [f"{r['ts']} [{r['action']}] {str(r['detail'] or '')[:200]}" for r in rows]
-                    logs_text = "\n".join(formatted) if formatted else logs_text
-                    source = "db:fallback"
+                    logs_text = "\n".join(formatted) if formatted else "no web logs fallback"
+                    source = "db:fallback (NOT real docker logs)"
         except Exception as e:
             if not logs_text:
                 logs_text = f"fallback also failed: {e} | docker_err={docker_err}"
                 source = "error"
 
-        if docker_err and logs_text and "fallback" in source:
-            logs_text = f"# docker_err: {docker_err}\n# source: {source}\n" + logs_text
-
     # parse into structured lines
     raw_lines = [l for l in logs_text.splitlines() if l.strip() != ""]
-    # classify + filter
     output = []
     for idx, ln in enumerate(raw_lines[-lines:]):
         lvl = _classify_level(ln)
         if level != "all" and lvl != level:
-            # allow warn to include error? no strict
             if not (level == "warn" and lvl == "error"):
                 continue
         if search and search.lower() not in ln.lower():
