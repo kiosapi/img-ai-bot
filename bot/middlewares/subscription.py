@@ -1,9 +1,10 @@
-"""Middleware: maintenance mode + channel subscription gate."""
+"""Middleware: maintenance mode + channel subscription gate — with Dynamic Texts support."""
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
+import texts as dyn_texts
 from config import REQUIRED_CHANNEL, ADMIN_IDS
 from i18n import t
 
@@ -41,9 +42,9 @@ async def _notify_referrer(bot, reward: dict, referred_user):
             desc = (f"Saldo {rupiah(reward['reward_amount'])}" if lang == "id"
                     else f"Balance {rupiah(reward['reward_amount'])}")
         text = (
-            f"🎉 <b>Bonus referral cair!</b>\n\n{name} baru saja join lewat link kamu.\nKamu dapat: <b>{desc}</b>"
+            f"\U0001f389 <b>Bonus referral cair!</b>\n\n{name} baru saja join lewat link kamu.\nKamu dapat: <b>{desc}</b>"
             if lang == "id" else
-            f"🎉 <b>Referral bonus unlocked!</b>\n\n{name} just joined via your link.\nYou received: <b>{desc}</b>"
+            f"\U0001f389 <b>Referral bonus unlocked!</b>\n\n{name} just joined via your link.\nYou received: <b>{desc}</b>"
         )
         await bot.send_message(reward["referrer_id"], text)
     except Exception:
@@ -51,33 +52,35 @@ async def _notify_referrer(bot, reward: dict, referred_user):
 
 
 class MaintenanceMiddleware(BaseMiddleware):
-    """Global maintenance gate — blocks all user messages except admins."""
+    """Global maintenance gate — blocks all user messages except admins. Supports dynamic texts."""
 
     async def __call__(self, handler, event: TelegramObject, data: dict):
         user = data.get("event_from_user")
         if user is None:
             return await handler(event, data)
-        # admins bypass
         if user.id in ADMIN_IDS:
             return await handler(event, data)
         try:
             maint = await db.get_setting("maintenance", "0")
             if maint == "1":
                 lang = await db.get_lang(user.id)
+                # dynamic maintenance_msg overrides i18n
+                msg = await dyn_texts.get_dynamic_text_or_none("maintenance_msg")
+                fallback = t("maintenance", lang)
+                txt = msg if msg else fallback
                 if isinstance(event, CallbackQuery):
                     try:
-                        await event.answer(t("maintenance", lang), show_alert=True)
+                        await event.answer(txt[:200], show_alert=True)
                     except Exception:
                         pass
                     return
                 elif isinstance(event, Message):
                     try:
-                        await event.answer(t("maintenance", lang))
+                        await event.answer(txt)
                     except Exception:
                         pass
                     return
         except Exception:
-            # fail open if DB error
             pass
         return await handler(event, data)
 
@@ -89,7 +92,6 @@ class SubscriptionMiddleware(BaseMiddleware):
         if user is None:
             return await handler(event, data)
 
-        # Always record user first — even if gate blocks later
         try:
             is_new = not await db.user_exists(user.id)
             await db.upsert_user(user.id, user.username, user.first_name, user.language_code)
@@ -104,7 +106,6 @@ class SubscriptionMiddleware(BaseMiddleware):
         except Exception:
             is_new = False
 
-        # If REQUIRED_CHANNEL empty or invalid, skip gate — don't block user growth
         channel = (REQUIRED_CHANNEL or "").strip()
         if not channel:
             if is_new:
@@ -119,8 +120,6 @@ class SubscriptionMiddleware(BaseMiddleware):
         try:
             subscribed = await is_subscribed(bot, user.id)
         except Exception:
-            # On get_chat_member failure (private channel, bot not admin, invalid username)
-            # do NOT block — fail open so users table grows, else admin sees only 1 user
             subscribed = True
 
         if subscribed:
@@ -134,10 +133,27 @@ class SubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         lang = await db.get_lang(user.id)
-        text = t("join_required", lang, channel=REQUIRED_CHANNEL)
+        # dynamic join_required_msg
+        dyn_join = await dyn_texts.get_dynamic_text_or_none("join_required_msg")
+        if dyn_join:
+            try:
+                text = dyn_join.format(channel=REQUIRED_CHANNEL) if "{channel}" in dyn_join else dyn_join
+            except Exception:
+                text = dyn_join
+        else:
+            text = t("join_required", lang, channel=REQUIRED_CHANNEL)
+
         if isinstance(event, CallbackQuery):
             try:
-                await event.answer(t("join_not_joined", lang), show_alert=True)
+                dyn_not_det = await dyn_texts.get_dynamic_text_or_none("join_not_detected_msg")
+                if dyn_not_det:
+                    try:
+                        nd_text = dyn_not_det.format(channel=REQUIRED_CHANNEL) if "{channel}" in dyn_not_det else dyn_not_det
+                    except Exception:
+                        nd_text = dyn_not_det
+                else:
+                    nd_text = t("join_not_joined", lang)
+                await event.answer(nd_text[:200], show_alert=True)
             except Exception:
                 pass
             try:

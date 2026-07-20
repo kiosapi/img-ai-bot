@@ -17,6 +17,9 @@ const TRANSLATIONS: Dict = {
   "nav.logs": { id: "Live Logs", en: "Live Logs" },
   "nav.system": { id: "System", en: "System" },
   "nav.health": { id: "Bot Health", en: "Bot Health" },
+  "nav.styles_manage": { id: "Style Presets", en: "Style Presets" },
+  "nav.texts": { id: "Teks Dinamis", en: "Dynamic Texts" },
+  "nav.commands": { id: "Commands", en: "Commands" },
   "nav.settings": { id: "Setting", en: "Settings" },
   "nav.audit": { id: "Audit Log", en: "Audit Log" },
   "nav.premium": { id: "Premium", en: "Premium" },
@@ -345,6 +348,33 @@ const TRANSLATIONS: Dict = {
   // Live Logs
   "logs.title": { id: "Live Logs", en: "Live Logs" },
   "logs.sub": { id: "Tail log bot/api/postgres - docker logs atau fallback DB", en: "Tail bot/api/postgres logs - docker logs or DB fallback" },
+
+  // Dynamic Texts
+  "nav.texts": { id: "Teks Dinamis", en: "Dynamic Texts" },
+  "texts.title": { id: "Teks Dinamis", en: "Dynamic Texts" },
+  "texts.sub": { id: "Kelola semua teks bot tanpa ubah kode — edit welcome, help, error, referral, premium, dsb. Support HTML.", en: "Manage all bot texts without code — edit welcome, help, errors, referral, premium etc. HTML supported." },
+  "texts.total": { id: "Total Kunci", en: "Total Keys" },
+  "texts.customized": { id: "Sudah Custom", en: "Customized" },
+  "texts.using_default": { id: "Fallback Default", en: "Default Fallback" },
+  "texts.groups": { id: "Grup", en: "Groups" },
+  "texts.search_ph": { id: "Cari key, value, deskripsi...", en: "Search key, value, description..." },
+  "texts.filter_all": { id: "Semua", en: "All" },
+  "texts.filter_set": { id: "Sudah di-set", en: "Set" },
+  "texts.filter_empty": { id: "Masih default", en: "Empty/Default" },
+  "texts.all_groups": { id: "Semua", en: "All" },
+  "texts.placeholder": { id: "Kosong = pakai default bawaan. Support {var}, HTML <b>, <i>, <code>.", en: "Empty = use default. Supports {var}, HTML <b>, <i>, <code>." },
+  "texts.saved": { id: "Tersimpan", en: "Saved" },
+  "texts.deleted": { id: "Dihapus — fallback aktif", en: "Deleted — fallback active" },
+  "texts.no_results": { id: "Tidak ada hasil — coba ubah filter/search", en: "No results — try changing filter/search" },
+  "texts.delete_title": { id: "Hapus custom text?", en: "Delete custom text?" },
+  "texts.how_title": { id: "Cara Pakai", en: "How to Use" },
+  "texts.how_1": { id: "Kosong = bot pakai fallback default (i18n.py / hardcoded). Isi = override instant tanpa restart.", en: "Empty = bot uses default fallback (i18n.py / hardcoded). Filled = instant override, no restart." },
+  "texts.how_2": { id: "Support placeholder seperti {name}, {brand}, {used}, {limit}, {err}, {link}, dll — biarkan jika tidak tahu.", en: "Supports placeholders {name}, {brand}, {used}, {limit}, {err}, {link}, etc — leave as is if unsure." },
+  "texts.how_3": { id: "Support HTML Telegram <b>, <i>, <code>, <u>. Jangan pakai <script> atau javascript: — akan diblokir.", en: "Supports Telegram HTML <b>, <i>, <code>, <u>. Don't use <script> or javascript: — blocked." },
+  "texts.how_4": { id: "Setelah Save, efek langsung — tidak perlu restart bot (dibaca via db.get_setting tiap request).", en: "After Save, instant effect — no bot restart needed (read via db.get_setting each request)." },
+  "common.refresh": { id: "Refresh", en: "Refresh" },
+  "common.saving": { id: "Menyimpan...", en: "Saving..." },
+  "common.clear": { id: "Clear", en: "Clear" },
 };
 
 function getSavedLang(): Lang {

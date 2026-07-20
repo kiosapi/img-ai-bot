@@ -7,6 +7,7 @@ import db
 import ui
 from i18n import t
 from tgutil import safe_edit
+import feature_flags as ff
 
 router = Router()
 PAGE_SIZE = 10
@@ -14,6 +15,9 @@ PAGE_SIZE = 10
 @router.message(Command("myworks"))
 async def cmd_myworks(message: Message):
     lang = await db.get_lang(message.from_user.id)
+    if not await ff.is_command_enabled("myworks"):
+        await message.answer(t("feature_disabled", lang), reply_markup=ui.back_menu(lang))
+        return
     total = await db.count_user_generations(message.from_user.id)
     if total == 0:
         await message.answer(t("myworks_empty", lang), reply_markup=ui.back_menu(lang))
@@ -25,6 +29,9 @@ async def cmd_myworks(message: Message):
 @router.callback_query(F.data.startswith("myworks:"))
 async def cb_myworks(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
+    if not await ff.is_command_enabled("myworks"):
+        await callback.answer(t("feature_disabled", lang), show_alert=True)
+        return
     try:
         offset = int(callback.data.split(":", 1)[1])
     except Exception:

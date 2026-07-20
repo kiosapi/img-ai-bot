@@ -9,6 +9,7 @@ import db
 import ui
 import styles as style_presets
 import feature_flags as ff
+import texts as dyn_texts
 from i18n import t
 from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE, ALLOWED_BATCHES, DEFAULT_BATCH
 from tgutil import safe_edit, ProgressAnimator
@@ -40,7 +41,13 @@ async def _ref_file_id_of(uid: int) -> str | None:
 
 async def _apply_user_style(uid: int, prompt: str) -> tuple[str, str]:
     sid = await _style_of(uid)
-    return style_presets.apply_style(prompt, sid), sid
+    try:
+        # TODO: prefer DB custom_styles if available
+        # try DB apply, fallback to hardcoded
+        applied = await db.apply_custom_style(prompt, sid)
+        return applied, sid
+    except Exception:
+        return style_presets.apply_style(prompt, sid), sid
 
 async def check_and_consume_multi(uid: int, n: int) -> tuple[bool,int,int]:
     ok, used, limit, _ = await db.check_and_consume_multi(uid, DEFAULT_DAILY_LIMIT, n)
@@ -137,12 +144,16 @@ async def _do_generate(message: Message, prompt: str, variation: bool=False, for
     lang = await db.get_lang(message.from_user.id)
     if (await db.get_setting("feat_queue_enabled","1"))=="1":
         if not await QUEUE.acquire(message.from_user.id):
-            await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
+            # dynamic busy_msg
+            busy_dyn = await dyn_texts.get_dynamic_text_or_none("busy_msg")
+            msg_busy = busy_dyn if busy_dyn else t("busy_generating", lang)
+            await message.answer(msg_busy, reply_markup=ui.back_menu(lang))
             return
     if await is_maintenance():
         if (await db.get_setting("feat_queue_enabled","1"))=="1":
             await QUEUE.release(message.from_user.id)
-        await message.answer(t("maintenance", lang))
+        maint_dyn = await dyn_texts.get_dynamic_text_or_none("maintenance_msg")
+        await message.answer(maint_dyn if maint_dyn else t("maintenance", lang))
         return
 
     batch = batch_override or await _batch_of(message.from_user.id)
@@ -199,7 +210,16 @@ async def _do_generate(message: Message, prompt: str, variation: bool=False, for
     # ATOMIC reservation upfront
     ok_batch, used_batch, limit_batch = await check_and_consume_multi(message.from_user.id, batch)
     if not ok_batch:
-        await message.answer(t("quota_exhausted", lang, used=used_batch, limit=limit_batch, bar=ui.quota_bar(used_batch, limit_batch)), reply_markup=ui.back_menu(lang))
+        # dynamic quota_exhausted_msg override
+        q_dyn = await dyn_texts.get_dynamic_text_or_none("quota_exhausted_msg")
+        if q_dyn:
+            try:
+                q_text = q_dyn.format(used=used_batch, limit=limit_batch, bar=ui.quota_bar(used_batch, limit_batch))
+            except Exception:
+                q_text = q_dyn
+        else:
+            q_text = t("quota_exhausted", lang, used=used_batch, limit=limit_batch, bar=ui.quota_bar(used_batch, limit_batch))
+        await message.answer(q_text, reply_markup=ui.back_menu(lang))
         if (await db.get_setting("feat_queue_enabled","1"))=="1":
             await QUEUE.release(message.from_user.id)
         return

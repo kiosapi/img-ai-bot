@@ -178,12 +178,22 @@ def lang_menu():
     kb.adjust(2)
     return kb.as_markup()
 
-def style_menu(current: str | None, lang: str = "id"):
+def style_menu(current: str | None, lang: str = "id", dynamic_styles: list[dict] | None = None):
+    """TODO: migrate fully to DB custom_styles. If dynamic_styles provided, use it (from db.get_custom_styles).
+    Fallback to hardcoded STYLES dict for offline/resilience.
+    """
     kb = InlineKeyboardBuilder()
-    for sid, info in style_presets.STYLES.items():
-        mark = "✓ " if sid == current else ""
-        label = info["label_id"] if lang == "id" else info["label_en"]
-        kb.button(text=f"{mark}{info['emoji']} {label}", callback_data=f"style:{sid}")
+    if dynamic_styles:
+        for s in dynamic_styles:
+            code = s.get("code", "")
+            name = s.get("name", code)
+            mark = "✓ " if code == current else ""
+            kb.button(text=f"{mark}{name}", callback_data=f"style:{code}")
+    else:
+        for sid, info in style_presets.STYLES.items():
+            mark = "✓ " if sid == current else ""
+            label = info["label_id"] if lang == "id" else info["label_en"]
+            kb.button(text=f"{mark}{info['emoji']} {label}", callback_data=f"style:{sid}")
     kb.button(text=t("back_home", lang), callback_data="menu:home")
     kb.adjust(2)
     return kb.as_markup()

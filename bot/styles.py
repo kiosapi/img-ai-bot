@@ -1,5 +1,18 @@
 """
 Style presets for image generation.
+Hardcoded fallback + DB-editable path.
+
+TODO Phase2 task 5: Bot should read from custom_styles DB when available.
+- bot/db.py already exposes get_custom_styles() + get_custom_style_by_code() + apply_custom_style()
+- handlers/style.py and generate.py should optionally load styles from DB (active only) if DB reachable
+- Fallback to STYLES dict here if DB empty/unavailable — keeps bot resilient offline
+- Production flow: dashboard (styles-manage) writes to custom_styles; bot polls DB per request via get_custom_styles(active_only=True)
+- No breaking change: apply_style() still works for legacy code using STYLES dict
+
+Adaptation implemented partially: db.py helpers exist, but runtime integration requires:
+  1) handlers/style.py: call db.get_custom_styles(active_only=True) instead of styles.STYLES directly (with fallback)
+  2) ui.py style_menu: accept dynamic list
+  3) keep this file as fallback constants + helpers for tests/offline
 """
 
 STYLES: dict[str, dict] = {

@@ -295,6 +295,51 @@ async def _create_schema():
             ON CONFLICT (id) DO NOTHING;
             """
         )
+        # ---- custom_styles: no-code style presets manager ----
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS custom_styles (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                prompt_prefix TEXT NOT NULL DEFAULT '',
+                thumbnail_url TEXT,
+                category TEXT NOT NULL DEFAULT 'general',
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                sort_order INT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;")
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'general';")
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;")
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS sort_order INT NOT NULL DEFAULT 0;")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_custom_styles_sort ON custom_styles(sort_order, id);")
+        # seed if empty from hardcoded styles.py
+        try:
+            cnt = await con.fetchval("SELECT count(*) FROM custom_styles")
+            if cnt == 0:
+                import styles as _style_seed
+                for idx, (code, info) in enumerate(_style_seed.STYLES.items()):
+                    name = info.get("label_en") or info.get("label_id") or code
+                    prefix = info.get("prompt_suffix") or ""
+                    cat = "general"
+                    # simple heuristic category from code
+                    if code in ("anime", "ghibli"):
+                        cat = "anime"
+                    elif code in ("realistic", "photo"):
+                        cat = "photo"
+                    elif code in ("cyberpunk", "fantasy", "3d"):
+                        cat = "fantasy"
+                    elif code in ("watercolor", "oil", "minimalist"):
+                        cat = "artistic"
+                    await con.execute(
+                        "INSERT INTO custom_styles (code, name, prompt_prefix, category, is_active, sort_order) VALUES ($1,$2,$3,$4,true,$5) ON CONFLICT (code) DO NOTHING",
+                        code, name, prefix, cat, idx
+                    )
+        except Exception:
+            pass
 
 
 # ---------- users ----------
@@ -1109,6 +1154,33 @@ async def get_sticker_max_per_pack() -> int:
     return max(1, min(v, 120))
 
 
+# ---------- command manager generic helpers ----------
+async def is_command_enabled(cmd_name: str) -> bool:
+    """Generic check feat_command_{name}_enabled default 1."""
+    key = f"feat_command_{cmd_name.lower()}_enabled"
+    v = await get_setting(key, "1")
+    return (v or "1") == "1"
+
+
+async def set_command_enabled(cmd_name: str, enabled: bool) -> None:
+    await set_setting(f"feat_command_{cmd_name.lower()}_enabled", "1" if enabled else "0")
+
+
+async def get_command_settings_map() -> dict[str, bool]:
+    """Return all command enabled map for quick lookup."""
+    # fetch all keys like feat_command_%_enabled
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT key, value FROM settings WHERE key LIKE 'feat_command_%_enabled'")
+    m = {r["key"]: (r["value"] == "1") for r in rows}
+    # fill defaults
+    defaults = ["generate","edit","style","myworks","checkin","sticker","premium","balance","referral","model","enhance","batch","batchold","quota","lang","size"]
+    for name in defaults:
+        k = f"feat_command_{name}_enabled"
+        if k not in m:
+            m[k] = True
+    return m
+
+
 # ---------- sticker packs (feature 17) ----------
 async def get_sticker_pack(pack_name: str) -> dict | None:
     async with _pool.acquire() as con:
@@ -1293,6 +1365,75 @@ async def set_default_model(model_id: str):
         pid = row["provider_id"]
         await con.execute("UPDATE ai_models SET is_default=false WHERE provider_id=$1", pid)
         await con.execute("UPDATE ai_models SET is_default=true WHERE id=$1", model_id)
+
+
+# ---------- custom_styles (DB editable presets, fallback to hardcoded styles.py) ----------
+async def get_custom_styles(active_only: bool = False, include_inactive: bool = False) -> list[dict]:
+    """Fetch custom styles from DB. Falls back to hardcoded styles.py if table empty/error.
+    Returns list ordered by sort_order,id with fields compatible to legacy STYLES dict shape.
+    """
+    try:
+        async with _pool.acquire() as con:
+            if active_only:
+                rows = await con.fetch("SELECT * FROM custom_styles WHERE is_active=true ORDER BY sort_order, id")
+            else:
+                rows = await con.fetch("SELECT * FROM custom_styles ORDER BY sort_order, id")
+        if not rows:
+            raise ValueError("empty")
+        return [dict(r) for r in rows]
+    except Exception:
+        # fallback to hardcoded
+        try:
+            import styles as _fallback
+            out = []
+            for idx, (code, info) in enumerate(_fallback.STYLES.items()):
+                out.append({
+                    "id": idx + 1,
+                    "code": code,
+                    "name": info.get("label_en") or info.get("label_id") or code,
+                    "prompt_prefix": info.get("prompt_suffix") or "",
+                    "thumbnail_url": None,
+                    "category": "general",
+                    "is_active": True,
+                    "sort_order": idx,
+                    "created_at": None,
+                })
+            return out
+        except Exception:
+            return []
+
+
+async def get_custom_style_by_code(code: str) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM custom_styles WHERE code=$1", code)
+        return dict(row) if row else None
+
+
+async def get_custom_style_by_id(sid: int) -> dict | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM custom_styles WHERE id=$1", sid)
+        return dict(row) if row else None
+
+
+async def apply_custom_style(prompt: str, style_code: str) -> str:
+    """Apply DB style prefix/suffix to prompt. Fallback to styles.py.apply_style if not found."""
+    if not style_code or style_code == "none":
+        return prompt
+    try:
+        info = await get_custom_style_by_code(style_code)
+        if info and info.get("prompt_prefix"):
+            suffix = info["prompt_prefix"].strip()
+            if suffix:
+                return f"{prompt}, {suffix}"
+        # fallback to hardcoded module
+        import styles as _fallback_mod
+        return _fallback_mod.apply_style(prompt, style_code)
+    except Exception:
+        try:
+            import styles as _fallback_mod
+            return _fallback_mod.apply_style(prompt, style_code)
+        except Exception:
+            return prompt
 
 
 

@@ -8,6 +8,7 @@ import db
 import ui
 from i18n import t
 from tgutil import safe_edit
+import feature_flags as ff
 
 router = Router()
 
@@ -24,7 +25,7 @@ def _checkin_text(info: dict, lang: str) -> str:
 @router.message(Command("checkin"))
 async def cmd_checkin(message: Message):
     lang = await db.get_lang(message.from_user.id)
-    if (await db.get_setting("feat_checkin_enabled", "1")) == "0":
+    if not await ff.is_command_enabled("checkin") or (await db.get_setting("feat_checkin_enabled", "1")) == "0":
         await message.answer(t("feature_disabled", lang), reply_markup=ui.back_menu(lang))
         return
     info = await db.get_checkin_info(message.from_user.id)
@@ -42,6 +43,9 @@ async def cmd_checkin(message: Message):
 @router.callback_query(F.data == "menu:checkin")
 async def nav_checkin(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
+    if not await ff.is_command_enabled("checkin"):
+        await callback.answer(t("feature_disabled", lang), show_alert=True)
+        return
     info = await db.get_checkin_info(callback.from_user.id)
     text = t("checkin_title", lang, streak=info.get("streak", 0), total=info.get("total_checkin", 0))
     can = info.get("last_checkin") != date.today()
@@ -52,6 +56,9 @@ async def nav_checkin(callback: CallbackQuery):
 @router.callback_query(F.data == "checkin:do")
 async def do_checkin(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
+    if not await ff.is_command_enabled("checkin"):
+        await callback.answer(t("feature_disabled", lang), show_alert=True)
+        return
     ok, new_streak, total, bonus = await db.try_checkin(callback.from_user.id)
     if not ok:
         await callback.answer(t("checkin_already", lang, streak=new_streak), show_alert=True)

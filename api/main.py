@@ -129,6 +129,49 @@ async def _ensure_tables():
                 created_at TIMESTAMPTZ DEFAULT now()
             )
         """)
+        # custom_styles no-code presets manager — MUST exist
+        await con.execute("""
+            CREATE TABLE IF NOT EXISTS custom_styles (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                prompt_prefix TEXT NOT NULL DEFAULT '',
+                thumbnail_url TEXT,
+                category TEXT NOT NULL DEFAULT 'general',
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                sort_order INT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;")
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'general';")
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;")
+        await con.execute("ALTER TABLE custom_styles ADD COLUMN IF NOT EXISTS sort_order INT NOT NULL DEFAULT 0;")
+        await con.execute("CREATE INDEX IF NOT EXISTS idx_custom_styles_sort ON custom_styles(sort_order, id);")
+        # seed if empty from hardcoded mapping (same as bot/styles.py)
+        try:
+            cnt = await con.fetchval("SELECT count(*) FROM custom_styles")
+            if cnt == 0:
+                seed = [
+                    ("none", "Default", "", "general", 0),
+                    ("anime", "Anime", "anime style, vibrant colors, detailed", "anime", 1),
+                    ("realistic", "Realistis", "photorealistic, highly detailed, 8k", "photo", 2),
+                    ("cyberpunk", "Cyberpunk", "cyberpunk style, neon lights, futuristic", "fantasy", 3),
+                    ("ghibli", "Ghibli", "Studio Ghibli style, soft colors, whimsical", "anime", 4),
+                    ("watercolor", "Aquarel", "watercolor painting style", "artistic", 5),
+                    ("3d", "3D Render", "3D render, octane, highly detailed, studio lighting", "fantasy", 6),
+                    ("oil", "Oil Painting", "oil painting style, textured brush strokes", "artistic", 7),
+                    ("minimalist", "Minimalis", "minimalist style, clean, simple", "artistic", 8),
+                    ("fantasy", "Fantasi", "fantasy art style, magical, epic lighting", "fantasy", 9),
+                    ("photo", "Fotografi", "professional photography, DSLR, sharp focus", "photo", 10),
+                ]
+                for code, name, pref, cat, order in seed:
+                    await con.execute(
+                        "INSERT INTO custom_styles (code, name, prompt_prefix, category, is_active, sort_order) VALUES ($1,$2,$3,$4,true,$5) ON CONFLICT (code) DO NOTHING",
+                        code, name, pref, cat, order
+                    )
+        except Exception as e:
+            print(f"warn seed custom_styles: {e}")
 
 async def audit_log(action: str, target: str | None = None, detail: str | None = None):
     try:
@@ -410,6 +453,91 @@ async def broadcast(body: BroadcastBody, _: bool = Depends(require_auth)):
     return {"ok": True, "sent": sent_counter, "total": len(rows)}
 
 # ---- Settings ----
+# ---- Command Manager constants (mirrors bot/feature_flags.py COMMAND_DEFS) ----
+COMMAND_DEFS: dict[str, dict] = {
+    "generate": {"group": "core", "icon": "Sparkles", "label_id": "Generate image", "label_en": "Generate image", "desc_id": "Buat gambar dari teks (inti)", "desc_en": "Generate image from text (core)", "core": True},
+    "edit": {"group": "core", "icon": "ImagePlus", "label_id": "Edit foto", "label_en": "Edit photo", "desc_id": "Edit / ubah foto (inti)", "desc_en": "Edit / modify photo (core)", "core": True},
+    "style": {"group": "core", "icon": "Palette", "label_id": "Gaya visual", "label_en": "Style presets", "desc_id": "Preset gaya visual", "desc_en": "Visual style presets", "core": False},
+    "size": {"group": "core", "icon": "Ruler", "label_id": "Ukuran", "label_en": "Size", "desc_id": "Pilihan ukuran gambar", "desc_en": "Image size selection", "core": True},
+    "quota": {"group": "core", "icon": "BarChart3", "label_id": "Kuota", "label_en": "Quota", "desc_id": "Cek kuota harian", "desc_en": "Check daily quota", "core": False},
+    "myworks": {"group": "core", "icon": "Images", "label_id": "Karya Saya", "label_en": "My Works", "desc_id": "Riwayat karya user", "desc_en": "User works history", "core": False},
+    "batch": {"group": "core", "icon": "Layers", "label_id": "Batch generate", "label_en": "Batch generate", "desc_id": "Generate beberapa variasi sekaligus (baru)", "desc_en": "Generate multiple variations at once (new)", "core": False},
+    "batchold": {"group": "core", "icon": "Layers3", "label_id": "Batch old", "label_en": "Batch old", "desc_id": "Batch legacy /batchold command", "desc_en": "Legacy batch /batchold command", "core": False},
+    "checkin": {"group": "social", "icon": "CalendarCheck", "label_id": "Check-in", "label_en": "Check-in", "desc_id": "Check-in harian streak", "desc_en": "Daily streak check-in", "core": False},
+    "referral": {"group": "social", "icon": "Gift", "label_id": "Ajak Teman", "label_en": "Referral", "desc_id": "Sistem referral ajak teman", "desc_en": "Referral invite friends system", "core": False},
+    "sticker": {"group": "premium", "icon": "Sticker", "label_id": "Sticker Pack", "label_en": "Sticker Pack", "desc_id": "Buat sticker dari karya", "desc_en": "Create sticker from works", "core": False},
+    "model": {"group": "core", "icon": "Bot", "label_id": "Model", "label_en": "Model", "desc_id": "Pilih model AI", "desc_en": "Select AI model", "core": False},
+    "enhance": {"group": "core", "icon": "Wand2", "label_id": "Enhance", "label_en": "Enhance", "desc_id": "Prompt enhance via LLM", "desc_en": "Prompt enhance via LLM", "core": False},
+    "premium": {"group": "premium", "icon": "Crown", "label_id": "Premium", "label_en": "Premium", "desc_id": "Upgrade premium", "desc_en": "Premium upgrade flow", "core": False},
+    "balance": {"group": "premium", "icon": "Wallet", "label_id": "Saldo", "label_en": "Balance", "desc_id": "Saldo & deposit", "desc_en": "Balance & deposits", "core": False},
+    "lang": {"group": "core", "icon": "Languages", "label_id": "Bahasa", "label_en": "Language", "desc_id": "Ganti bahasa bot", "desc_en": "Change bot language", "core": False},
+}
+
+def _cmd_setting_key(name: str) -> str:
+    return f"feat_command_{name.lower()}_enabled"
+
+async def _get_all_commands_status() -> list[dict]:
+    out = []
+    for name, defn in COMMAND_DEFS.items():
+        v = await get_setting(_cmd_setting_key(name), "1")
+        enabled = (v or "1") == "1"
+        out.append({
+            "name": name,
+            "is_enabled": enabled,
+            "setting_key": _cmd_setting_key(name),
+            "group": defn.get("group", "core"),
+            "icon": defn.get("icon", "Command"),
+            "label_id": defn.get("label_id", name),
+            "label_en": defn.get("label_en", name),
+            "description_id": defn.get("desc_id", name),
+            "description_en": defn.get("desc_en", name),
+            "is_core": bool(defn.get("core", False)),
+        })
+    return out
+
+# ---- Command Manager API ----
+class CommandToggleBody(BaseModel):
+    enabled: bool
+
+class CommandBulkItem(BaseModel):
+    name: str = Field(..., min_length=1, max_length=30, pattern=r"^[a-z0-9_-]{1,30}$")
+    enabled: bool
+
+class CommandBulkBody(BaseModel):
+    updates: list[CommandBulkItem] = Field(..., min_length=1, max_length=50)
+
+@app.get("/api/commands")
+async def list_commands(_: bool = Depends(require_auth)):
+    cmds = await _get_all_commands_status()
+    return {"commands": cmds, "total": len(cmds)}
+
+@app.put("/api/commands/{name}/toggle")
+async def toggle_command(name: str, body: CommandToggleBody, _: bool = Depends(require_auth)):
+    name_l = name.lower().strip()
+    if name_l not in COMMAND_DEFS:
+        raise HTTPException(status_code=404, detail=f"Command '{name}' tidak dikenal")
+    if not re.match(r"^[a-z0-9_-]{1,30}$", name_l):
+        raise HTTPException(status_code=400, detail="nama command tidak valid")
+    await set_setting(_cmd_setting_key(name_l), "1" if body.enabled else "0")
+    await audit_log("command_toggle", name_l, f"enabled={body.enabled}")
+    return {"ok": True, "name": name_l, "is_enabled": body.enabled}
+
+@app.post("/api/commands/bulk")
+async def bulk_commands(body: CommandBulkBody, _: bool = Depends(require_auth)):
+    seen = set()
+    saved = []
+    for item in body.updates:
+        nl = item.name.lower().strip()
+        if nl not in COMMAND_DEFS:
+            raise HTTPException(status_code=400, detail=f"Unknown command: {nl}")
+        if nl in seen:
+            raise HTTPException(status_code=400, detail=f"Duplicate command: {nl}")
+        seen.add(nl)
+        await set_setting(_cmd_setting_key(nl), "1" if item.enabled else "0")
+        saved.append({"name": nl, "is_enabled": item.enabled})
+    await audit_log("commands_bulk", ",".join([s["name"] for s in saved]), str(saved)[:1000])
+    return {"ok": True, "updated": saved}
+
 @app.get("/api/settings")
 async def get_settings(_: bool = Depends(require_auth)):
     limit = await get_setting("daily_limit", str(DEFAULT_DAILY_LIMIT))
@@ -1098,6 +1226,133 @@ async def referral_list(_: bool = Depends(require_auth)):
     async with _pool.acquire() as con:
         rows=await con.fetch("SELECT r.*, ru.username AS referrer_username, ru.first_name AS referrer_first_name, rd.username AS referred_username, rd.first_name AS referred_first_name FROM referrals r LEFT JOIN users ru ON ru.user_id=r.referrer_id LEFT JOIN users rd ON rd.user_id=r.referred_id ORDER BY r.id DESC LIMIT 200")
     return {"referrals": [dict(r) for r in rows]}
+
+# ---- Dynamic Texts Manager (Phase2 task4) ----
+TEXTS_DEFINITIONS: list[dict] = [
+    # welcome group
+    {"key": "welcome_text", "group": "Welcome", "description": "Sapaan awal /start — support {name} {brand} placeholders"},
+    {"key": "welcome_back_text", "group": "Welcome", "description": "Dipakai saat nav_home — fallback ke welcome_text jika kosong"},
+    # help group
+    {"key": "help_text", "group": "Help", "description": "Panduan /help — markdown HTML b/i/code"},
+    {"key": "menu_hint", "group": "Help", "description": "Hint kecil di bawah prompt_ask"},
+    # errors/quota
+    {"key": "maintenance_msg", "group": "Errors", "description": "Pesan saat maintenance mode aktif"},
+    {"key": "quota_exhausted_msg", "group": "Errors", "description": "Pesan ketika kuota habis — support {used} {limit} {bar}"},
+    {"key": "daily_limit_msg", "group": "Errors", "description": "Alias legacy untuk quota_exhausted"},
+    {"key": "nsfw_msg", "group": "Errors", "description": "Ditolak karena konten NSFW/kebijakan — jika provider menolak"},
+    {"key": "banned_msg", "group": "Errors", "description": "Pesan untuk user yang dibanned"},
+    {"key": "busy_msg", "group": "Errors", "description": "Anti-spam queue — user masih ada job aktif"},
+    {"key": "gen_failed_msg", "group": "Errors", "description": "Gagal generate — support {err}"},
+    {"key": "edit_failed_msg", "group": "Errors", "description": "Gagal edit — support {err}"},
+    # checkin
+    {"key": "checkin_msg", "group": "Checkin", "description": "Judul panel check-in — support {streak} {total}"},
+    {"key": "checkin_success_msg", "group": "Checkin", "description": "Setelah berhasil check-in — {streak} {bonus} {total}"},
+    {"key": "checkin_already_msg", "group": "Checkin", "description": "Sudah check-in hari ini — {streak}"},
+    # referral
+    {"key": "referral_invite_text", "group": "Referral", "description": "Teks ajak teman — support {link} {reward_desc} {total} {rewarded} {pending} {bonus_quota}"},
+    {"key": "referral_reward_balance_text", "group": "Referral", "description": "Label reward saldo — {amount}"},
+    {"key": "referral_reward_quota_text", "group": "Referral", "description": "Label reward quota — {n}"},
+    # premium
+    {"key": "premium_expired_msg", "group": "Premium", "description": "Pesan ketika premium habis"},
+    {"key": "upgrade_no_plans_msg", "group": "Premium", "description": "Saat belum ada paket tersedia"},
+    {"key": "upgrade_intro_msg", "group": "Premium", "description": "Intro upgrade ke premium"},
+    # balance/deposit
+    {"key": "deposit_disabled_msg", "group": "Balance", "description": "Fitur top-up sedang dimatikan"},
+    {"key": "deposit_success_msg", "group": "Balance", "description": "Top-up approved — {amount} {balance}"},
+    {"key": "deposit_pending_msg", "group": "Balance", "description": "Bukti diterima, menunggu verifikasi"},
+    # other
+    {"key": "join_required_msg", "group": "Subscription", "description": "Wajib join channel — support {channel}"},
+    {"key": "join_success_msg", "group": "Subscription", "description": "Berhasil deteksi join channel"},
+    {"key": "join_not_detected_msg", "group": "Subscription", "description": "Belum terdeteksi join — {channel}"},
+    {"key": "inline_empty_msg", "group": "Inline", "description": "Inline gallery kosong"},
+    {"key": "feat_disabled_msg", "group": "Features", "description": "Fitur sedang dimatikan admin"},
+]
+
+def _texts_defaults_map() -> dict:
+    # Build default fallbacks — empty means app uses hardcoded i18n
+    return {d["key"]: "" for d in TEXTS_DEFINITIONS}
+
+class TextUpsertBody(BaseModel):
+    key: str = Field(..., min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_]{1,100}$")
+    value: str = Field(..., max_length=10000)
+
+@app.get("/api/texts")
+async def list_texts(_: bool = Depends(require_auth)):
+    # Always return full list with defaults merged from settings
+    defaults = _texts_defaults_map()
+    # known keys list — we store dynamic texts as settings keys exactly as typed
+    # Additionally, filter settings that match our defs
+    defined_keys = {d["key"] for d in TEXTS_DEFINITIONS}
+    # Load existing values from settings
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT key, value FROM settings WHERE key = ANY($1::text[])", list(defined_keys))
+    stored = {r["key"]: r["value"] for r in rows}
+    result = []
+    for d in TEXTS_DEFINITIONS:
+        k = d["key"]
+        result.append({
+            "key": k,
+            "value": stored.get(k, defaults.get(k, "")),
+            "description": d.get("description", ""),
+            "group": d.get("group", "Other"),
+            "is_set": k in stored and bool(stored[k]),
+        })
+    # also include any custom text_* keys not in definitions (user-created)
+    extra_keys = [kk for kk in stored.keys() if kk.startswith("text_") and kk not in defined_keys]
+    # Or any setting key ending with _msg/_text not in defs
+    if extra_keys:
+        async with _pool.acquire() as con:
+            pass  # stored already
+        for kk in extra_keys:
+            result.append({"key": kk, "value": stored.get(kk, ""), "description": "Custom", "group": "Custom", "is_set": True})
+    return {"texts": result, "total": len(result)}
+
+@app.get("/api/texts/{key}")
+async def get_text(key: str, _: bool = Depends(require_auth)):
+    key = key.strip()[:100]
+    if not key:
+        raise HTTPException(status_code=400, detail="key required")
+    # allow any key matching pattern but return accordingly
+    if not re.match(r"^[A-Za-z0-9_]{1,100}$", key):
+        raise HTTPException(status_code=400, detail="invalid key format")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT value FROM settings WHERE key=$1", key)
+    defn = next((d for d in TEXTS_DEFINITIONS if d["key"] == key), None)
+    return {
+        "key": key,
+        "value": row["value"] if row else "",
+        "description": defn["description"] if defn else "Custom dynamic text",
+        "group": defn["group"] if defn else "Custom",
+        "is_set": bool(row and row["value"]),
+    }
+
+@app.post("/api/texts")
+async def upsert_text(body: TextUpsertBody, _: bool = Depends(require_auth)):
+    k = body.key.strip()
+    v = body.value  # keep as is, support markdown/HTML, trim only trailing? preserve intentional spaces.
+    # Validate key pattern already via pydantic
+    # Basic XSS check: disallow javascript: in value? No, user admin may include html. But block only if value contains <script
+    low = v.lower()
+    if "<script" in low or "javascript:" in low.replace(" ", ""):
+        raise HTTPException(status_code=400, detail="Value contains disallowed content (script/javascript:)")
+    async with _pool.acquire() as con:
+        await con.execute(
+            "INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            k, v,
+        )
+    await audit_log("text_upsert", k, f"len={len(v)}")
+    return {"ok": True, "key": k}
+
+@app.delete("/api/texts/{key}")
+async def delete_text(key: str, _: bool = Depends(require_auth)):
+    key = key.strip()[:100]
+    if not re.match(r"^[A-Za-z0-9_]{1,100}$", key):
+        raise HTTPException(status_code=400, detail="invalid key")
+    # Allow deleting custom only? We'll allow all but just clear value.
+    async with _pool.acquire() as con:
+        await con.execute("DELETE FROM settings WHERE key=$1", key)
+    await audit_log("text_delete", key, "")
+    return {"ok": True}
 
 @app.get("/api/audit/logs")
 async def audit_logs(limit: int = 100, _: bool = Depends(require_auth)):
@@ -1815,4 +2070,218 @@ async def system_docker(_: bool = Depends(require_auth)):
         loop = asyncio.get_running_loop()
         top = await loop.run_in_executor(None, _top_procs)
         return {"ok": True, "docker_available": False, "fallback": "processes", "top_processes": top}
+
+
+# ---- Custom Styles Presets Manager (no-code) ----
+_STYLE_CODE_RE = re.compile(r"^[a-z0-9_-]{1,30}$")
+
+class StyleCreateBody(BaseModel):
+    code: str = Field(..., min_length=1, max_length=30, description="slug e.g. anime, ghibli")
+    name: str = Field(..., min_length=1, max_length=100)
+    prompt_prefix: str = Field(default="", max_length=500)
+    thumbnail_url: str | None = Field(default=None, max_length=500)
+    category: str = Field(default="general", max_length=30)
+    is_active: bool = True
+    sort_order: int = Field(default=0, ge=0, le=10000)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v):
+        v = v.strip().lower()
+        if not _STYLE_CODE_RE.match(v):
+            raise ValueError("code harus ^[a-z0-9_-]{1,30}$ huruf kecil, angka, -_ saja")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v):
+        vv = v.strip()
+        if not vv:
+            raise ValueError("name wajib")
+        if len(vv) > 100:
+            raise ValueError("name max 100")
+        return vv
+
+    @field_validator("category")
+    @classmethod
+    def validate_cat(cls, v):
+        vv = (v or "general").strip().lower()[:30]
+        allowed = {"general","anime","photo","fantasy","artistic","realistic","3d","portrait","landscape","other"}
+        # allow custom but normalize; if not in allowed keep as-is but ensure alnum-_
+        if not re.match(r"^[a-z0-9_-]{1,30}$", vv):
+            raise ValueError("category harus alfanum -_ 1-30")
+        return vv
+
+class StyleUpdateBody(BaseModel):
+    code: str | None = Field(default=None, max_length=30)
+    name: str | None = Field(default=None, max_length=100)
+    prompt_prefix: str | None = Field(default=None, max_length=500)
+    thumbnail_url: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, max_length=30)
+    is_active: bool | None = None
+    sort_order: int | None = Field(default=None, ge=0, le=10000)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code_opt(cls, v):
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if not _STYLE_CODE_RE.match(v):
+            raise ValueError("code harus ^[a-z0-9_-]{1,30}$")
+        return v
+
+    @field_validator("category")
+    @classmethod
+    def validate_cat_opt(cls, v):
+        if v is None:
+            return v
+        vv = v.strip().lower()[:30]
+        if not re.match(r"^[a-z0-9_-]{1,30}$", vv):
+            raise ValueError("category harus alfanum -_ 1-30")
+        return vv
+
+@app.get("/api/styles/list")
+async def list_styles_ep(q: str = "", category: str = "", active: str = "", _: bool = Depends(require_auth)):
+    q = (q or "").strip()[:100]
+    category = (category or "").strip().lower()[:30]
+    # active filter: "true"/"false"/"" (all)
+    where_parts = []
+    args = []
+    idx = 1
+    if q:
+        like = f"%{q}%"
+        where_parts.append(f"(code ILIKE ${idx} OR name ILIKE ${idx} OR category ILIKE ${idx} OR prompt_prefix ILIKE ${idx})")
+        args.append(like)
+        idx += 1
+    if category:
+        where_parts.append(f"category = ${idx}")
+        args.append(category)
+        idx += 1
+    if active.lower() == "true":
+        where_parts.append("is_active = true")
+    elif active.lower() == "false":
+        where_parts.append("is_active = false")
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    sql = f"SELECT * FROM custom_styles {where_sql} ORDER BY sort_order, id"
+    async with _pool.acquire() as con:
+        rows = await con.fetch(sql, *args)
+    return {"styles": [dict(r) for r in rows]}
+
+@app.get("/api/styles/categories")
+async def style_categories_ep(_: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        rows = await con.fetch("SELECT DISTINCT category FROM custom_styles ORDER BY category")
+    return {"categories": [r["category"] for r in rows]}
+
+@app.post("/api/styles")
+async def create_style_ep(body: StyleCreateBody, _: bool = Depends(require_auth)):
+    # thumbnail url optional validation — must https/http if present, no SSRF
+    if body.thumbnail_url:
+        u = body.thumbnail_url.strip()
+        if u and not _is_safe_url(u):
+            raise HTTPException(status_code=400, detail="thumbnail_url tidak aman")
+        if u and not (u.lower().startswith("https://") or u.lower().startswith("http://")):
+            raise HTTPException(status_code=400, detail="thumbnail_url harus http/https")
+    async with _pool.acquire() as con:
+        exists = await con.fetchrow("SELECT id FROM custom_styles WHERE code=$1", body.code)
+        if exists:
+            raise HTTPException(status_code=409, detail=f"code '{body.code}' sudah ada")
+        row = await con.fetchrow(
+            "INSERT INTO custom_styles (code, name, prompt_prefix, thumbnail_url, category, is_active, sort_order) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+            body.code, body.name.strip(), (body.prompt_prefix or "")[:500], body.thumbnail_url, body.category, body.is_active, body.sort_order
+        )
+    await audit_log("style_create", str(row["id"]), f"code={body.code} name={body.name}")
+    return {"ok": True, "style": dict(row)}
+
+@app.put("/api/styles/{style_id}")
+async def update_style_ep(style_id: int, body: StyleUpdateBody, _: bool = Depends(require_auth)):
+    if style_id < 1:
+        raise HTTPException(status_code=400, detail="ID tidak valid")
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT * FROM custom_styles WHERE id=$1", style_id)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Style tidak ditemukan")
+        # if changing code, uniqueness check
+        if body.code and body.code != cur["code"]:
+            dup = await con.fetchrow("SELECT id FROM custom_styles WHERE code=$1 AND id!=$2", body.code, style_id)
+            if dup:
+                raise HTTPException(status_code=409, detail=f"code '{body.code}' sudah dipakai style lain")
+        # thumbnail_url validation
+        if body.thumbnail_url is not None and body.thumbnail_url.strip():
+            u = body.thumbnail_url.strip()
+            if not _is_safe_url(u):
+                raise HTTPException(status_code=400, detail="thumbnail_url tidak aman — private IP diblokir")
+            if not (u.lower().startswith("https://") or u.lower().startswith("http://")):
+                raise HTTPException(status_code=400, detail="thumbnail_url harus http/https")
+        # build dynamic update
+        fields = []
+        vals = []
+        idx = 1
+        mapping = {
+            "code": body.code,
+            "name": body.name.strip() if body.name else None,
+            "prompt_prefix": (body.prompt_prefix[:500] if body.prompt_prefix is not None else None),
+            "thumbnail_url": body.thumbnail_url,
+            "category": body.category,
+            "is_active": body.is_active,
+            "sort_order": body.sort_order,
+        }
+        for col, val in mapping.items():
+            if val is not None:
+                fields.append(f"{col} = ${idx}")
+                vals.append(val)
+                idx += 1
+        if not fields:
+            return {"ok": True, "style": dict(cur)}
+        vals.append(style_id)
+        sql = f"UPDATE custom_styles SET {', '.join(fields)} WHERE id=${idx} RETURNING *"
+        row = await con.fetchrow(sql, *vals)
+    await audit_log("style_update", str(style_id), f"fields={list(mapping.keys())}")
+    return {"ok": True, "style": dict(row) if row else dict(cur)}
+
+@app.delete("/api/styles/{style_id}")
+async def delete_style_ep(style_id: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        cur = await con.fetchrow("SELECT code,name FROM custom_styles WHERE id=$1", style_id)
+        if not cur:
+            raise HTTPException(status_code=404, detail="Style tidak ditemukan")
+        await con.execute("DELETE FROM custom_styles WHERE id=$1", style_id)
+    await audit_log("style_delete", str(style_id), f"code={cur['code']} name={cur['name']}")
+    return {"ok": True}
+
+@app.patch("/api/styles/{style_id}/toggle")
+async def toggle_style_ep(style_id: int, _: bool = Depends(require_auth)):
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT is_active FROM custom_styles WHERE id=$1", style_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Style tidak ditemukan")
+        await con.execute("UPDATE custom_styles SET is_active = NOT is_active WHERE id=$1", style_id)
+        newrow = await con.fetchrow("SELECT * FROM custom_styles WHERE id=$1", style_id)
+    await audit_log("style_toggle", str(style_id), f"is_active={newrow['is_active'] if newrow else ''}")
+    return {"ok": True, "style": dict(newrow) if newrow else {"is_active": not row["is_active"]}, "is_active": (newrow["is_active"] if newrow else not row["is_active"])}
+
+# Reorder endpoint optional — bulk set sort_order via map id->order
+class StyleReorderBody(BaseModel):
+    order: list[int] = Field(..., max_length=200, description="ordered list of style ids")
+
+@app.post("/api/styles/reorder")
+async def reorder_styles_ep(body: StyleReorderBody, _: bool = Depends(require_auth)):
+    if not body.order:
+        raise HTTPException(status_code=400, detail="order kosong")
+    if len(set(body.order)) != len(body.order):
+        raise HTTPException(status_code=400, detail="order harus unique")
+    async with _pool.acquire() as con:
+        # verify all exist
+        existing = await con.fetch("SELECT id FROM custom_styles WHERE id = ANY($1)", body.order)
+        existing_ids = {r["id"] for r in existing}
+        missing = [i for i in body.order if i not in existing_ids]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"ID tidak ditemukan: {missing}")
+        async with con.transaction():
+            for idx, sid in enumerate(body.order):
+                await con.execute("UPDATE custom_styles SET sort_order=$1 WHERE id=$2", idx, sid)
+    await audit_log("style_reorder", "-", f"count={len(body.order)}")
+    return {"ok": True}
+
 

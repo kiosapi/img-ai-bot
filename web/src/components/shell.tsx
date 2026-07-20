@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
-import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X, Wallet, ArrowDownToLine, Gift, Bot, ShieldCheck, ScrollText, Server, HeartPulse } from "lucide-react";
+import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarChart3, AlertTriangle, Crown, CreditCard, Receipt, Menu, X, Wallet, ArrowDownToLine, Gift, Bot, ShieldCheck, ScrollText, Server, HeartPulse, FileText, Palette, Command } from "lucide-react";
 import { cn, api } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useLang, FlagID, FlagEN } from "@/lib/i18n";
@@ -20,6 +20,9 @@ const groups = [
       { href: "/broadcast", labelKey: "nav.broadcast", icon: Radio },
       { href: "/referral", labelKey: "nav.referral", icon: Gift },
       { href: "/models", labelKey: "nav.models", icon: Bot },
+      { href: "/styles-manage", labelKey: "nav.styles_manage", icon: Palette },
+      { href: "/texts", labelKey: "nav.texts", icon: FileText },
+      { href: "/commands", labelKey: "nav.commands", icon: Command },
       { href: "/errors", labelKey: "nav.errors", icon: AlertTriangle },
       { href: "/logs", labelKey: "nav.logs", icon: ScrollText },
       { href: "/settings", labelKey: "nav.settings", icon: Settings },

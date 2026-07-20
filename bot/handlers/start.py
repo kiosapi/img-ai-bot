@@ -6,6 +6,7 @@ from aiogram.types import Message, CallbackQuery, ForceReply
 
 import db
 import ui
+import texts as dyn_texts
 from i18n import t
 from config import REQUIRED_CHANNEL, DEFAULT_DAILY_LIMIT, DEFAULT_SIZE
 from middlewares.subscription import is_subscribed
@@ -18,6 +19,24 @@ router = Router()
 async def _lang(user_id: int) -> str:
     return await db.get_lang(user_id)
 
+async def _welcome_dynamic(name: str, lang: str) -> str:
+    # Try dynamic first, fallback to ui.welcome
+    base = ui.welcome(name, lang)
+    dyn = await dyn_texts.get_dynamic_text_or_none("welcome_text")
+    if dyn:
+        try:
+            # support {name} {brand} placeholders if admin used them
+            return dyn.format(name=name, brand=ui.BRAND) if "{" in dyn else dyn
+        except Exception:
+            return dyn
+    return base
+
+async def _help_dynamic(lang: str) -> str:
+    dyn = await dyn_texts.get_dynamic_text_or_none("help_text")
+    if dyn:
+        return dyn
+    return ui.help_text(lang)
+
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -28,25 +47,25 @@ async def cmd_start(message: Message, state: FSMContext):
     if payload.startswith("gen_"):
         raw = payload[4:].replace("_", " ").strip()
         if raw and raw not in ("inline_empty", "inline_new"):
-            await message.answer(ui.welcome(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
+            await message.answer(await _welcome_dynamic(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
             from handlers.generate import _do_generate
             lang2 = await _lang(u.id)
             await message.answer(f"🎨 <b>Generate:</b> <i>{raw}</i>\n\nMulai membuat...", reply_markup=ui.back_menu(lang2))
             await _do_generate(message, raw)
             return
-    await message.answer(ui.welcome(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
+    await message.answer(await _welcome_dynamic(u.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     lang = await _lang(message.from_user.id)
-    await message.answer(ui.help_text(lang), reply_markup=ui.back_menu(lang))
+    await message.answer(await _help_dynamic(lang), reply_markup=ui.back_menu(lang))
 
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
     lang = await _lang(message.from_user.id)
-    await message.answer(ui.welcome(message.from_user.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
+    await message.answer(await _welcome_dynamic(message.from_user.first_name or "kawan", lang), reply_markup=ui.main_menu(lang))
 
 
 @router.message(Command("quota"))

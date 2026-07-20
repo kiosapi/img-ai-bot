@@ -44,7 +44,7 @@ def _resize_to_sticker(img_bytes: bytes) -> bytes:
 @router.message(Command("sticker"))
 async def cmd_sticker(message: Message):
     lang = await db.get_lang(message.from_user.id)
-    if not await ff.sticker_enabled():
+    if not await ff.is_command_enabled("sticker") or not await ff.sticker_enabled():
         await message.answer(t("feature_disabled", lang), reply_markup=ui.back_menu(lang))
         return
     bot_me = await message.bot.get_me()
@@ -57,7 +57,7 @@ async def cmd_sticker(message: Message):
 @router.callback_query(F.data == "menu:sticker")
 async def nav_sticker(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
-    if not await ff.sticker_enabled():
+    if not await ff.is_command_enabled("sticker") or not await ff.sticker_enabled():
         await callback.answer(t("feature_disabled", lang), show_alert=True)
         return
     bot_me = await callback.bot.get_me()
@@ -71,6 +71,9 @@ async def nav_sticker(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("sticker:add:"))
 async def cb_sticker_add(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
+    if not await ff.is_command_enabled("sticker"):
+        await callback.answer(t("feature_disabled", lang), show_alert=True)
+        return
     try:
         gen_id = int(callback.data.split(":")[2])
     except Exception:
