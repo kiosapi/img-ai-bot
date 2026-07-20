@@ -166,7 +166,7 @@ export default function TextsPage() {
               <Input className="pl-9" placeholder={t("texts.search_ph") || "Cari key, value, description..."} value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
             <div className="flex items-center gap-2">
-              <CustomSelect value={filterSet} onChange={setFilterSet} options={[{value:"all",label:t("texts.filter_all")||"Semua"},{value:"set",label:t("texts.filter_set")||"Sudah di-set"},{value:"empty",label:t("texts.filter_empty")||"Masih default"}]} className="w-[150px]" />
+              <CustomSelect value={filterSet} onChange={(v)=>setFilterSet(v as any)} options={[{value:"all",label:t("texts.filter_all")||"Semua"},{value:"set",label:t("texts.filter_set")||"Sudah di-set"},{value:"empty",label:t("texts.filter_empty")||"Masih default"}]} className="w-[150px]" />
               <Badge variant="muted">{filtered.length} / {texts.length}</Badge>
             </div>
           </div>
