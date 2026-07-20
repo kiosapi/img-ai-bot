@@ -386,7 +386,7 @@ export default function ModerationPage() {
         </div>
       </Modal>
 
-      <ConfirmDialog open={!!delTarget} onClose={()=>setDelTarget(null)} title={lang==="id"?"Hapus Rule?":"Delete Rule?"} description={delTarget ? `${lang==="id"?"Yakin hapus rule":"Delete rule"} "${delTarget.pattern.slice(0,50)}"?` : ""} onConfirm={doDelete} confirmText={lang==="id"?"Ya, Hapus":"Yes, Delete"} variant="destructive" />
+      <ConfirmDialog open={!!delTarget} onClose={()=>setDelTarget(null)} title={lang==="id"?"Hapus Rule?":"Delete Rule?"} description={delTarget ? `${lang==="id"?"Yakin hapus rule":"Delete rule"} "${delTarget.pattern.slice(0,50)}"?` : ""} onConfirm={doDelete} confirmLabel={lang==="id"?"Ya, Hapus":"Yes, Delete"} variant="destructive" />
     </div>
   );
 }
