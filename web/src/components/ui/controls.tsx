@@ -39,13 +39,14 @@ function Badge({ className, variant = "default", ...props }: React.HTMLAttribute
   return <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold", variants[variant], className)} {...props} />;
 }
 
-function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+function Switch({ checked, onChange, onCheckedChange }: { checked: boolean; onChange?: (v: boolean) => void; onCheckedChange?: (v: boolean) => void }) {
+  const handleChange = (v: boolean) => { if (onCheckedChange) onCheckedChange(v); if (onChange) onChange(v); };
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
-      onClick={() => onChange(!checked)}
+      onClick={() => handleChange(!checked)}
       className={cn("relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full transition-colors", checked ? "bg-success" : "bg-input")}
     >
       <span className={cn("pointer-events-none absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform", checked && "translate-x-5")} />
