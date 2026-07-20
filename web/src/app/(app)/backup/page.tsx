@@ -375,7 +375,7 @@ export default function BackupPage() {
       {/* delete confirm */}
       <ConfirmDialog
         open={!!deleteTarget}
-        onOpenChange={o => { if (!o) setDeleteTarget(null); }}
+        onClose={() => setDeleteTarget(null)}
         title={lang === "id" ? "Hapus Backup?" : "Delete Backup?"}
         description={deleteTarget ? (lang === "id" ? `Yakin hapus ${deleteTarget.filename}? File di disk juga akan dihapus. Tidak bisa dibatalkan.` : `Delete ${deleteTarget.filename}? File on disk will be removed. Cannot undo.`) : ""}
         confirmLabel={lang === "id" ? "Ya, Hapus" : "Yes, Delete"}
@@ -386,7 +386,7 @@ export default function BackupPage() {
 
       {/* restore double confirm */}
       {restoreTarget && (
-        <Modal open={!!restoreTarget} onOpenChange={o => { if (!o) { setRestoreTarget(null); setRestoreConfirmText(""); setRestoreStep(1); } }} title={restoreStep === 1 ? (lang === "id" ? "Konfirmasi Restore" : "Confirm Restore") : (lang === "id" ? "Ketik RESTORE" : "Type RESTORE")}>
+        <Modal open={!!restoreTarget} onClose={() => { setRestoreTarget(null); setRestoreConfirmText(""); setRestoreStep(1); }} title={restoreStep === 1 ? (lang === "id" ? "Konfirmasi Restore" : "Confirm Restore") : (lang === "id" ? "Ketik RESTORE" : "Type RESTORE")}>
           <div className="flex flex-col gap-3">
             {restoreStep === 1 && (
               <>
