@@ -15,7 +15,6 @@ from handlers import start, generate, edit, premium, balance, style, myworks, ch
 
 logging.basicConfig(level=logging.INFO)
 
-
 async def _set_commands(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="start", description="🏠 Menu utama / Main menu"),
@@ -35,34 +34,26 @@ async def _set_commands(bot: Bot):
         BotCommand(command="help", description="❓ Bantuan / Help"),
     ])
 
-
 def _get_storage():
-    # Try PG storage, fallback to Memory if pool not ready or table missing
     try:
         from fsm_pg import PGStorage
         return PGStorage(lambda: db._pool)
     except Exception:
         return MemoryStorage()
 
-
 async def main():
     await db.init_pool(config.DATABASE_URL)
     await db.seed_default_plan()
 
-    bot = Bot(
-        token=config.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     storage = _get_storage()
     dp = Dispatcher(storage=storage)
 
-    # Subscription gate + maintenance applies to messages and callbacks
     maint_mw = MaintenanceMiddleware()
     sub_mw = SubscriptionMiddleware()
-    dp.message.middleware(maint_mw)
-    dp.message.middleware(sub_mw)
-    dp.callback_query.middleware(maint_mw)
-    dp.callback_query.middleware(sub_mw)
+    for obs in (dp.message, dp.callback_query, dp.inline_query):
+        obs.middleware(maint_mw)
+        obs.middleware(sub_mw)
 
     dp.include_router(start.router)
     dp.include_router(checkin.router)
@@ -84,7 +75,6 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await db.close_pool()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

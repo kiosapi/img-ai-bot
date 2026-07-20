@@ -1,4 +1,4 @@
-"""My Works / History: list user's generated images using stored Telegram file_id."""
+"""My Works / History: list text dulu, gambar muncul hanya pas view."""
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.filters import Command
@@ -9,8 +9,7 @@ from i18n import t
 from tgutil import safe_edit
 
 router = Router()
-PAGE_SIZE = 5
-
+PAGE_SIZE = 10
 
 @router.message(Command("myworks"))
 async def cmd_myworks(message: Message):
@@ -22,7 +21,6 @@ async def cmd_myworks(message: Message):
     gens = await db.get_user_generations(message.from_user.id, limit=PAGE_SIZE, offset=0)
     text = t("myworks_title", lang, total=total, shown=len(gens))
     await message.answer(text, reply_markup=ui.myworks_menu(gens, total, 0, PAGE_SIZE, lang))
-
 
 @router.callback_query(F.data.startswith("myworks:"))
 async def cb_myworks(callback: CallbackQuery):
@@ -44,7 +42,6 @@ async def cb_myworks(callback: CallbackQuery):
     await safe_edit(callback.message, text, reply_markup=ui.myworks_menu(gens, total, offset, PAGE_SIZE, lang))
     await callback.answer()
 
-
 @router.callback_query(F.data.startswith("view:"))
 async def cb_view(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
@@ -61,15 +58,25 @@ async def cb_view(callback: CallbackQuery):
         await callback.answer(t("invalid_data", lang), show_alert=True)
         return
     date_str = gen["created_at"].strftime("%d %b %Y") if gen.get("created_at") else ""
-    caption = t("myworks_view", lang, id=gen["id"], prompt=(gen.get("prompt") or "")[:200], size=gen.get("size") or "-", kind=gen.get("kind") or "-", date=date_str)
-    # We cannot edit current text message to photo (if current is text), safe_edit handles photo case by delete+send
-    # But for view we want to send photo directly
+    extra = ""
+    if gen.get("negative_prompt"):
+        extra += f"\n🚫 Neg: {gen['negative_prompt'][:60]}"
+    if gen.get("seed"):
+        extra += f"\n🎲 Seed: {gen['seed']}"
+    if gen.get("batch_id"):
+        extra += f"\n🎲 Batch: {gen['batch_id'][:8]}"
+    if gen.get("ref_file_id"):
+        extra += "\n🖼️ Ref: ON"
+    caption = t("myworks_view", lang, id=gen["id"], prompt=(gen.get("prompt") or "")[:300], size=gen.get("size") or "-", kind=gen.get("kind") or "-", date=date_str) + extra
     try:
         await callback.message.answer_photo(
             gen["result_file_id"],
-            caption=caption,
+            caption=caption[:1000],
             reply_markup=ui.myworks_view_menu(gen["id"], lang)
         )
-    except Exception as e:
-        await callback.message.answer(caption, reply_markup=ui.myworks_view_menu(gen["id"], lang))
+    except Exception:
+        try:
+            await callback.message.answer(caption[:1000], reply_markup=ui.myworks_view_menu(gen["id"], lang))
+        except Exception:
+            pass
     await callback.answer()

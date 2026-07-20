@@ -6,10 +6,11 @@ import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Badge, Switch } from "@/components/ui/controls";
-
-const rupiah = (n: number) => "Rp" + Number(n || 0).toLocaleString("id-ID");
+import { useLang } from "@/lib/i18n";
 
 export default function ReferralPage() {
+  const { t, lang } = useLang();
+  const rupiah = (n: number) => "Rp" + Number(n || 0).toLocaleString("id-ID");
   const [enabled, setEnabled] = useState(true);
   const [rewardType, setRewardType] = useState<"balance" | "quota">("balance");
   const [rewardAmount, setRewardAmount] = useState(5000);
@@ -17,99 +18,77 @@ export default function ReferralPage() {
   const [stats, setStats] = useState<any>(null);
   const [list, setList] = useState<any[]>([]);
 
-  const loadSettings = () =>
-    api("/api/referral/settings").then((s) => {
-      setEnabled(s.enabled); setRewardType(s.reward_type); setRewardAmount(s.reward_amount);
-    }).catch(() => {});
+  const loadSettings = () => api("/api/referral/settings").then((s) => { setEnabled(s.enabled); setRewardType(s.reward_type); setRewardAmount(s.reward_amount); }).catch(() => {});
   const loadStats = () => api("/api/referral/stats").then(setStats).catch(() => {});
   const loadList = () => api("/api/referral/list").then((d) => setList(d.referrals || [])).catch(() => {});
-
   useEffect(() => { loadSettings(); loadStats(); loadList(); }, []);
 
   async function save() {
-    if (rewardAmount < 0) { toast.error("Nominal bonus tidak valid"); return; }
+    if (rewardAmount < 0) { toast.error("Invalid"); return; }
     setLoading(true);
     try {
-      await api("/api/referral/settings", {
-        method: "POST",
-        body: JSON.stringify({ enabled, reward_type: rewardType, reward_amount: Number(rewardAmount) }),
-      });
-      toast.success("Pengaturan referral disimpan");
-    } catch { toast.error("Gagal menyimpan"); }
-    finally { setLoading(false); }
+      await api("/api/referral/settings", { method: "POST", body: JSON.stringify({ enabled, reward_type: rewardType, reward_amount: Number(rewardAmount) }) });
+      toast.success(t("referral.saved"));
+    } catch { toast.error(t("settings.failed")); } finally { setLoading(false); }
   }
-
-  const nameOf = (username?: string, firstName?: string, id?: number) =>
-    username ? `@${username}` : (firstName || `ID ${id}`);
+  const nameOf = (username?: string, firstName?: string, id?: number) => username ? `@${username}` : (firstName || `ID ${id}`);
 
   return (
     <div className="flex flex-col gap-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Referral</h1>
-        <p className="text-sm text-muted-foreground">Kelola sistem ajak teman & bonusnya — semua bisa diubah tanpa sentuh kode</p>
+        <h1 className="text-2xl font-bold tracking-tight">{t("referral.title")}</h1>
+        <p className="text-sm text-muted-foreground">{t("referral.sub")}</p>
       </div>
 
       {stats && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold">{stats.total}</div><div className="text-xs text-muted-foreground mt-1">Total Referral</div></CardContent></Card>
-          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold text-emerald-500">{stats.rewarded}</div><div className="text-xs text-muted-foreground mt-1">Sudah Dapat Bonus</div></CardContent></Card>
-          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold text-amber-500">{stats.pending}</div><div className="text-xs text-muted-foreground mt-1">Menunggu Join Channel</div></CardContent></Card>
-          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold text-primary">{rupiah(stats.balance_paid)}</div><div className="text-xs text-muted-foreground mt-1">Total Saldo Terbagi</div></CardContent></Card>
+          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold">{stats.total}</div><div className="text-xs text-muted-foreground mt-1">{t("referral.total")}</div></CardContent></Card>
+          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold text-emerald-500">{stats.rewarded}</div><div className="text-xs text-muted-foreground mt-1">{t("referral.rewarded")}</div></CardContent></Card>
+          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold text-amber-500">{stats.pending}</div><div className="text-xs text-muted-foreground mt-1">{t("referral.pending")}</div></CardContent></Card>
+          <Card><CardContent className="pt-5"><div className="text-2xl font-extrabold text-primary">{rupiah(stats.balance_paid)}</div><div className="text-xs text-muted-foreground mt-1">{t("referral.balance_paid")}</div></CardContent></Card>
         </div>
       )}
 
       <Card>
-        <CardHeader><CardTitle><Gift className="h-4 w-4" />Pengaturan Bonus Referral</CardTitle></CardHeader>
+        <CardHeader><CardTitle><Gift className="h-4 w-4" />{t("referral.settings")}</CardTitle></CardHeader>
         <CardContent className="flex flex-col gap-4">
           <div className="flex items-center gap-3">
             <div className="flex-1">
-              <div className="text-sm font-semibold">Aktifkan Sistem Referral</div>
-              <div className="text-xs text-muted-foreground">Jika nonaktif, link referral baru tidak akan dicatat lagi</div>
+              <div className="text-sm font-semibold">{t("referral.enable")}</div>
+              <div className="text-xs text-muted-foreground">{t("referral.enable_desc")}</div>
             </div>
             <Switch checked={enabled} onChange={setEnabled} />
           </div>
 
           <div className="border-t pt-4">
-            <label className="mb-2 block text-sm font-medium">Jenis Bonus untuk Pengundang (Referrer)</label>
+            <label className="mb-2 block text-sm font-medium">{t("referral.bonus_type")}</label>
             <div className="flex flex-col gap-2 sm:flex-row">
-              <button
-                onClick={() => setRewardType("balance")}
-                className={`flex flex-1 items-center gap-2 rounded-md border px-3 py-2.5 text-sm font-medium transition-colors ${rewardType === "balance" ? "border-primary bg-primary/10 text-primary" : "hover:bg-accent"}`}
-              >
-                <Wallet className="h-4 w-4" />Tambah Saldo
+              <button onClick={() => setRewardType("balance")}
+                className={`flex flex-1 items-center gap-2 rounded-md border px-3 py-2.5 text-sm font-medium transition-colors ${rewardType === "balance" ? "border-primary bg-primary/10 text-primary" : "hover:bg-accent"}`}>
+                <Wallet className="h-4 w-4" />{t("referral.add_balance")}
               </button>
-              <button
-                onClick={() => setRewardType("quota")}
-                className={`flex flex-1 items-center gap-2 rounded-md border px-3 py-2.5 text-sm font-medium transition-colors ${rewardType === "quota" ? "border-primary bg-primary/10 text-primary" : "hover:bg-accent"}`}
-              >
-                <ImageIcon className="h-4 w-4" />Tambah Kuota Gambar
+              <button onClick={() => setRewardType("quota")}
+                className={`flex flex-1 items-center gap-2 rounded-md border px-3 py-2.5 text-sm font-medium transition-colors ${rewardType === "quota" ? "border-primary bg-primary/10 text-primary" : "hover:bg-accent"}`}>
+                <ImageIcon className="h-4 w-4" />{t("referral.add_quota")}
               </button>
             </div>
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium">
-              {rewardType === "balance" ? "Nominal Saldo per Referral Berhasil" : "Jumlah Kuota Gambar per Referral Berhasil"}
-            </label>
-            <Input
-              type="number" min={0} value={rewardAmount}
-              onChange={(e) => setRewardAmount(Number(e.target.value))}
-              placeholder={rewardType === "balance" ? "mis. 5000" : "mis. 5"}
-            />
+            <label className="mb-1.5 block text-sm font-medium">{rewardType === "balance" ? t("referral.amount_balance") : t("referral.amount_quota")}</label>
+            <Input type="number" min={0} value={rewardAmount} onChange={(e) => setRewardAmount(Number(e.target.value))} placeholder={rewardType === "balance" ? "5000" : "5"} />
             <p className="mt-1.5 text-xs text-muted-foreground">
-              {rewardType === "balance"
-                ? `Setiap referral berhasil (teman join channel), pengundang dapat ${rupiah(rewardAmount)} saldo otomatis.`
-                : `Setiap referral berhasil (teman join channel), pengundang dapat ${rewardAmount} kuota gambar tambahan (di luar limit harian).`}
+              {rewardType === "balance" ? t("referral.amount_balance_desc", { amount: rupiah(rewardAmount) }) : t("referral.amount_quota_desc", { amount: String(rewardAmount) })}
             </p>
           </div>
         </CardContent>
       </Card>
 
-      <Button onClick={save} disabled={loading}>{loading ? "Menyimpan..." : "Simpan Pengaturan"}</Button>
+      <Button onClick={save} disabled={loading}>{loading ? t("referral.saving") : t("referral.save")}</Button>
 
       {stats?.top_referrers?.length > 0 && (
         <Card>
-          <CardHeader><CardTitle><Trophy className="h-4 w-4" />Top Pengundang</CardTitle></CardHeader>
+          <CardHeader><CardTitle><Trophy className="h-4 w-4" />{t("referral.top")}</CardTitle></CardHeader>
           <CardContent className="flex flex-col gap-0 px-0 pt-0">
             {stats.top_referrers.map((r: any, i: number) => (
               <div key={r.referrer_id} className="flex items-center gap-3 border-b px-5 py-3 last:border-0">
@@ -119,8 +98,8 @@ export default function ReferralPage() {
                   <div className="text-xs text-muted-foreground">ID {r.referrer_id}</div>
                 </div>
                 <div className="text-right text-sm">
-                  <div className="font-semibold text-emerald-500">{r.rewarded} berhasil</div>
-                  <div className="text-xs text-muted-foreground">{r.total} total diundang</div>
+                  <div className="font-semibold text-emerald-500">{r.rewarded} {t("referral.success")}</div>
+                  <div className="text-xs text-muted-foreground">{r.total} total</div>
                 </div>
               </div>
             ))}
@@ -129,42 +108,35 @@ export default function ReferralPage() {
       )}
 
       <Card>
-        <CardHeader><CardTitle><Users className="h-4 w-4" />Riwayat Referral</CardTitle></CardHeader>
+        <CardHeader><CardTitle><Users className="h-4 w-4" />{t("referral.history")}</CardTitle></CardHeader>
         <CardContent className="flex flex-col gap-0 px-0 pt-0">
-          {list.length === 0 && <div className="py-8 text-center text-sm text-muted-foreground">Belum ada referral</div>}
+          {list.length === 0 && <div className="py-8 text-center text-sm text-muted-foreground">{t("referral.no_referral")}</div>}
           {list.map((r) => (
             <div key={r.id} className="flex items-start gap-3 border-b px-5 py-3 last:border-0">
-              {r.status === "rewarded"
-                ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500 mt-0.5" />
-                : <Clock className="h-4 w-4 shrink-0 text-amber-500 mt-0.5" />}
+              {r.status === "rewarded" ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500 mt-0.5" /> : <Clock className="h-4 w-4 shrink-0 text-amber-500 mt-0.5" />}
               <div className="min-w-0 flex-1">
                 <div className="text-sm">
                   <span className="font-medium">{nameOf(r.referrer_username, r.referrer_first_name, r.referrer_id)}</span>
-                  <span className="text-muted-foreground"> mengundang </span>
+                  <span className="text-muted-foreground"> {t("referral.invited")} </span>
                   <span className="font-medium">{nameOf(r.referred_username, r.referred_first_name, r.referred_id)}</span>
                 </div>
                 <div className="text-xs text-muted-foreground mt-0.5">
-                  {new Date(r.created_at).toLocaleString("id-ID")}
-                  {r.status === "rewarded" && (
-                    <> · Bonus: {r.reward_type === "balance" ? rupiah(r.reward_amount) : `${r.reward_amount} kuota`}</>
-                  )}
+                  {new Date(r.created_at).toLocaleString(lang==="id"?"id-ID":"en-US")}
+                  {r.status === "rewarded" && <> · {t("referral.bonus", { v: r.reward_type === "balance" ? rupiah(r.reward_amount) : `${r.reward_amount} quota` })}</>}
                 </div>
               </div>
-              <Badge variant={r.status === "rewarded" ? "success" : "muted"}>
-                {r.status === "rewarded" ? "berhasil" : "menunggu join"}
-              </Badge>
+              <Badge variant={r.status === "rewarded" ? "success" : "muted"}>{r.status === "rewarded" ? t("referral.success") : t("referral.waiting")}</Badge>
             </div>
           ))}
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle><Info className="h-4 w-4" />Cara Kerja</CardTitle></CardHeader>
+        <CardHeader><CardTitle><Info className="h-4 w-4" />{t("referral.how")}</CardTitle></CardHeader>
         <CardContent className="flex flex-col gap-2 text-sm text-muted-foreground">
-          <p>• Setiap user punya link referral unik (menu <b className="text-foreground">Ajak Teman</b> di bot), format <code>https://t.me/nama_bot?start=ref_ID</code>.</p>
-          <p>• Bonus ke pengundang dicairkan otomatis <b className="text-foreground">begitu teman yang diundang join channel wajib</b> untuk pertama kali (bukan langsung saat /start, guna mencegah abuse akun palsu).</p>
-          <p>• Jenis bonus bisa diatur di sini: <b className="text-foreground">saldo</b> (masuk ke saldo akun, bisa dipakai beli premium) atau <b className="text-foreground">kuota gambar</b> (kuota tambahan di luar limit harian, otomatis kepakai duluan setelah limit harian habis).</p>
-          <p>• Perubahan pengaturan di sini hanya berlaku untuk referral BARU — referral yang sudah tercatat sebelumnya tetap pakai jenis/nominal bonus lama (snapshot saat itu).</p>
+          <p>{t("referral.how1")}</p>
+          <p>{t("referral.how2")}</p>
+          <p>{t("referral.how3")}</p>
         </CardContent>
       </Card>
     </div>

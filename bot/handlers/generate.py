@@ -1,87 +1,158 @@
-"""Text-to-image generation: uses provider router (Cubence + Right Codes), model selection via DB."""
+"""Text-to-image generation: production batch 1/2/4, negative, seed, ref photo, gallery — atomic quota fix."""
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
+import io, uuid, random, asyncio
 
 import db
 import ui
 import styles as style_presets
 import feature_flags as ff
 from i18n import t
-from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE
+from config import DEFAULT_DAILY_LIMIT, ALLOWED_SIZES, DEFAULT_SIZE, ALLOWED_BATCHES, DEFAULT_BATCH
 from tgutil import safe_edit, ProgressAnimator
 from states import GenerateStates
 from gen_queue import QUEUE
 
 router = Router()
 
-
 async def is_maintenance() -> bool:
     return (await db.get_setting("maintenance", "0")) == "1"
 
+async def _size_of(uid: int) -> str:
+    return await db.get_pref_size(uid, DEFAULT_SIZE)
 
-async def _size_of(user_id: int) -> str:
-    return await db.get_pref_size(user_id, DEFAULT_SIZE)
+async def _style_of(uid: int) -> str:
+    return await db.get_pref_style(uid, "none") or "none"
 
+async def _batch_of(uid: int) -> int:
+    return await db.get_pref_batch(uid, DEFAULT_BATCH)
 
-async def _style_of(user_id: int) -> str:
-    return await db.get_pref_style(user_id, "none") or "none"
+async def _neg_of(uid: int) -> str:
+    return await db.get_pref_negative(uid)
 
+async def _seed_of(uid: int) -> str | None:
+    return await db.get_pref_seed(uid)
 
-async def _apply_user_style(user_id: int, prompt: str) -> tuple[str, str]:
-    sid = await _style_of(user_id)
-    styled = style_presets.apply_style(prompt, sid)
-    return styled, sid
+async def _ref_file_id_of(uid: int) -> str | None:
+    return await db.get_pref_ref_file_id(uid)
 
+async def _apply_user_style(uid: int, prompt: str) -> tuple[str, str]:
+    sid = await _style_of(uid)
+    return style_presets.apply_style(prompt, sid), sid
 
-async def check_and_consume(user_id: int) -> tuple[bool, int, int]:
-    allowed, used, limit, _bonus = await db.check_and_consume_atomic(user_id, DEFAULT_DAILY_LIMIT)
-    return allowed, used, limit
+async def check_and_consume_multi(uid: int, n: int) -> tuple[bool,int,int]:
+    ok, used, limit, _ = await db.check_and_consume_multi(uid, DEFAULT_DAILY_LIMIT, n)
+    return ok, used, limit
 
+async def check_and_consume(uid: int) -> tuple[bool,int,int]:
+    ok, used, limit, _ = await db.check_and_consume_atomic(uid, DEFAULT_DAILY_LIMIT)
+    return ok, used, limit
 
 @router.message(Command("size"))
 async def cmd_size(message: Message):
     lang = await db.get_lang(message.from_user.id)
-    current = await db.get_pref_size(message.from_user.id, DEFAULT_SIZE)
-    await message.answer(t("size_pick", lang), reply_markup=ui.size_menu(current, lang))
-
+    cur = await _size_of(message.from_user.id)
+    await message.answer(t("size_pick", lang), reply_markup=ui.size_menu(cur, lang))
 
 @router.callback_query(F.data.startswith("size:"))
 async def set_size(callback: CallbackQuery):
     lang = await db.get_lang(callback.from_user.id)
-    size = callback.data.split(":", 1)[1]
+    size = callback.data.split(":",1)[1]
     if size in ALLOWED_SIZES:
         await db.set_pref_size(callback.from_user.id, size)
         await safe_edit(callback.message, t("size_set", lang, size=size), reply_markup=ui.back_menu(lang))
     await callback.answer(t("size_saved", lang))
 
-
-async def _do_generate(message: Message, prompt: str, variation: bool = False, force_size: str | None = None, enhance: bool = False):
+@router.message(Command("batch"))
+async def cmd_batch(message: Message):
     lang = await db.get_lang(message.from_user.id)
-    if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+    parts = message.text.split(maxsplit=2)
+    if len(parts)>=2 and parts[1].isdigit() and int(parts[1]) in ALLOWED_BATCHES:
+        if len(parts)==3 and parts[2].strip():
+            await db.set_pref_batch(message.from_user.id, int(parts[1]))
+            await _do_generate(message, parts[2].strip(), batch_override=int(parts[1]))
+            return
+        await db.set_pref_batch(message.from_user.id, int(parts[1]))
+        cur = await _batch_of(message.from_user.id)
+        await message.answer(t("batch_set", lang, n=cur), reply_markup=ui.back_menu(lang))
+        return
+    cur = await _batch_of(message.from_user.id)
+    await message.answer(t("batch_pick", lang), reply_markup=ui.batch_menu(cur, lang))
+
+@router.callback_query(F.data.regexp(r"^batch:[12]$|^batch:4$"))
+async def set_batch(callback: CallbackQuery):
+    lang = await db.get_lang(callback.from_user.id)
+    try:
+        b = int(callback.data.split(":")[1])
+    except Exception:
+        b = DEFAULT_BATCH
+    if b in ALLOWED_BATCHES:
+        await db.set_pref_batch(callback.from_user.id, b)
+        await safe_edit(callback.message, t("batch_set", lang, n=b), reply_markup=ui.back_menu(lang))
+    await callback.answer("Saved")
+
+@router.callback_query(F.data=="menu:batch")
+async def menu_batch(callback: CallbackQuery):
+    lang = await db.get_lang(callback.from_user.id)
+    cur = await _batch_of(callback.from_user.id)
+    await safe_edit(callback.message, t("batch_pick", lang), reply_markup=ui.batch_menu(cur, lang))
+    await callback.answer()
+
+@router.callback_query(F.data=="menu:adv")
+async def menu_adv(callback: CallbackQuery):
+    lang = await db.get_lang(callback.from_user.id)
+    neg = await _neg_of(callback.from_user.id)
+    seed = await _seed_of(callback.from_user.id)
+    ref = await _ref_file_id_of(callback.from_user.id)
+    text = t("adv_title", lang)
+    await safe_edit(callback.message, text, reply_markup=ui.adv_menu(lang, has_negative=bool(neg), has_seed=bool(seed), has_ref=bool(ref)))
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("adv:"))
+async def cb_adv(callback: CallbackQuery, state: FSMContext):
+    lang = await db.get_lang(callback.from_user.id)
+    action = callback.data.split(":",1)[1]
+    if action=="neg":
+        await state.set_state(GenerateStates.waiting_negative)
+        await callback.message.answer(t("adv_neg_ask", lang))
+        await callback.answer()
+    elif action=="seed":
+        await state.set_state(GenerateStates.waiting_seed)
+        await callback.message.answer(t("adv_seed_ask", lang))
+        await callback.answer()
+    elif action=="ref":
+        await state.set_state(GenerateStates.waiting_ref_photo)
+        await callback.message.answer(t("adv_ref_ask", lang))
+        await callback.answer()
+    elif action=="clear":
+        await db.set_pref_negative(callback.from_user.id, "")
+        await db.set_pref_seed(callback.from_user.id, None)
+        await db.set_pref_ref_file_id(callback.from_user.id, None)
+        await safe_edit(callback.message, t("adv_cleared", lang), reply_markup=ui.back_menu(lang))
+        await callback.answer("Cleared")
+
+async def _do_generate(message: Message, prompt: str, variation: bool=False, force_size: str | None=None, enhance: bool=False, batch_override: int | None=None):
+    lang = await db.get_lang(message.from_user.id)
+    if (await db.get_setting("feat_queue_enabled","1"))=="1":
         if not await QUEUE.acquire(message.from_user.id):
             await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
             return
-
     if await is_maintenance():
-        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+        if (await db.get_setting("feat_queue_enabled","1"))=="1":
             await QUEUE.release(message.from_user.id)
         await message.answer(t("maintenance", lang))
         return
 
-    allowed, used, limit = await check_and_consume(message.from_user.id)
-    if not allowed:
-        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
-            await QUEUE.release(message.from_user.id)
-        await message.answer(
-            t("quota_exhausted", lang, used=used, limit=limit, bar=ui.quota_bar(used, limit)),
-            reply_markup=ui.back_menu(lang))
-        return
-
+    batch = batch_override or await _batch_of(message.from_user.id)
+    if batch not in ALLOWED_BATCHES:
+        batch = 1
     size = force_size or await _size_of(message.from_user.id)
+    negative = await _neg_of(message.from_user.id)
+    seed = await _seed_of(message.from_user.id)
+    ref_file_id = await _ref_file_id_of(message.from_user.id)
 
-    # resolve model for user (privacy: no provider leak)
     try:
         active_model = await db.get_active_model_for_user(message.from_user.id)
     except Exception:
@@ -90,159 +161,246 @@ async def _do_generate(message: Message, prompt: str, variation: bool = False, f
     final_prompt = prompt
     if enhance:
         if not await ff.enhance_enabled():
-            enhance = False
+            enhance=False
         else:
             try:
                 from enhancer import enhance_prompt
-                enhanced = await enhance_prompt(prompt)
-                if enhanced and len(enhanced.strip()) > 5:
-                    final_prompt = enhanced
+                en = await enhance_prompt(prompt)
+                if en and len(en.strip())>5:
+                    final_prompt=en
             except Exception:
                 pass
 
     styled_prompt, style_id = await _apply_user_style(message.from_user.id, final_prompt)
     if variation:
-        import random
-        var_hints = ["different angle", "different lighting", "slightly different composition", "alternative perspective", "with slight variation"]
-        styled_prompt = f"{styled_prompt}, {random.choice(var_hints)}"
+        hints=["different angle","different lighting","slightly different composition","alternative perspective","with slight variation"]
+        styled_prompt=f"{styled_prompt}, {random.choice(hints)}"
 
     try:
         from watermark import should_watermark, apply_watermark_image
         wm_on, wm_text = await should_watermark(message.from_user.id)
+        # force modern text only
+        if wm_text and "Buat di" in wm_text:
+            wm_text="@imgaai_bot"
     except Exception:
-        wm_on, wm_text = False, ""
+        wm_on, wm_text=False, ""
 
-    status = await message.answer(t("generating", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
-    animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used, limit=limit))
-    animator.start()
-    try:
-        from providers import generate_image as provider_generate, ProviderError
-        img = await provider_generate(active_model, styled_prompt, size=size, user_id=message.from_user.id)
-
-        if wm_on and wm_text:
-            try:
-                img = apply_watermark_image(img, wm_text)
-            except Exception:
-                pass
-
-        # display current model name — privacy short code RC/ CB only
-        model_label = ""
-        if active_model:
-            try:
-                from model_display import format_model_label
-                model_label = format_model_label(active_model.get("provider_id",""), active_model.get("external_id") or active_model.get("id",""), active_model.get("display_name"))
-            except Exception:
-                model_label = active_model.get("display_name") or active_model.get("external_id") or ""
-
-        caption_base = t("gen_done", lang, prompt=final_prompt[:200], size=size, left=ui.sisa_text(used, limit, lang))
-        if model_label:
-            caption_base += f"\nModel: {model_label}"
-        if wm_on and wm_text:
-            caption_base += f"\n\n{wm_text}"
-
-        sent = await message.answer_photo(
-            BufferedInputFile(img, filename="image.png"),
-            caption=caption_base,
-            reply_markup=ui.result_menu(lang, gen_id=0, file_id=None),
-        )
+    ref_bytes: bytes | None = None
+    if ref_file_id:
         try:
-            result_file_id = sent.photo[-1].file_id
+            buf=io.BytesIO()
+            await message.bot.download(ref_file_id, destination=buf)
+            ref_bytes=buf.getvalue()
         except Exception:
-            result_file_id = None
+            ref_bytes=None
 
-        gen_id = await db.log_generation(
-            message.from_user.id, "generate", final_prompt, size, True,
-            result_file_id=result_file_id, style_id=style_id if style_id != "none" else None
-        )
-        # also update model_id column if exist
-        if gen_id and active_model:
+    batch_id = str(uuid.uuid4()) if batch>1 else None
+
+    # ATOMIC reservation upfront
+    ok_batch, used_batch, limit_batch = await check_and_consume_multi(message.from_user.id, batch)
+    if not ok_batch:
+        await message.answer(t("quota_exhausted", lang, used=used_batch, limit=limit_batch, bar=ui.quota_bar(used_batch, limit_batch)), reply_markup=ui.back_menu(lang))
+        if (await db.get_setting("feat_queue_enabled","1"))=="1":
+            await QUEUE.release(message.from_user.id)
+        return
+
+    status = await message.answer(t("generating", lang, used=used_batch, limit=limit_batch)+"\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used_batch, limit=limit_batch))
+    animator.start()
+    produced=0
+    try:
+        from providers import generate_image as provider_generate
+        for idx in range(batch):
+            cur_seed=seed
+            if batch>1 and seed:
+                try:
+                    cur_seed=str(int(seed)+idx)
+                except Exception:
+                    pass
+            p_prompt=styled_prompt
+            if batch>1 and not seed:
+                p_prompt=f"{styled_prompt} -- variation {idx+1}"
+            try:
+                img_bytes = await provider_generate(
+                    active_model, p_prompt, size=size, user_id=message.from_user.id,
+                    negative=negative, seed=cur_seed,
+                    ref_images_b64=[ref_bytes] if ref_bytes else None
+                )
+            except Exception as e:
+                err=str(e)[:500]
+                try:
+                    async with db._pool.acquire() as con:
+                        await con.execute("INSERT INTO generations (user_id,kind,prompt,size,success,style_id,model_id,batch_id,negative_prompt,seed,ref_file_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id",
+                                          message.from_user.id,"generate",final_prompt,size,False,style_id if style_id!="none" else None, active_model["id"] if active_model else None, batch_id, negative or None, cur_seed, ref_file_id)
+                except Exception:
+                    await db.log_generation(message.from_user.id,"generate",final_prompt,size,False)
+                if idx==0:
+                    await message.answer(t("gen_failed", lang, err=err), reply_markup=ui.back_menu(lang))
+                    return
+                continue
+
+            if wm_on and wm_text:
+                try:
+                    img_bytes=apply_watermark_image(img_bytes, wm_text)
+                except Exception:
+                    pass
+
+            model_label=""
+            if active_model:
+                try:
+                    from model_display import format_model_label
+                    model_label=format_model_label(active_model.get("provider_id",""), active_model.get("external_id") or active_model.get("id",""), active_model.get("display_name"))
+                except Exception:
+                    model_label=active_model.get("display_name") or ""
+
+            if batch==1:
+                cap=t("gen_done", lang, prompt=final_prompt[:200], size=size, left=ui.sisa_text(used_batch, limit_batch, lang))
+                if negative: cap+=f"\n🚫 Neg: {negative[:80]}"
+                if seed: cap+=f"\n🎲 Seed: {seed}"
+                if ref_file_id: cap+="\n🖼️ Ref: ON"
+                if model_label: cap+=f"\nModel: {model_label}"
+                if wm_on and wm_text: cap+=f"\n\n{wm_text}"
+                sent=await message.answer_photo(BufferedInputFile(img_bytes, filename="image.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
+            else:
+                cap=t("batch_done_item", lang, idx=idx+1, total=batch, prompt=final_prompt[:120], size=size)+f"\n📊 {ui.sisa_text(used_batch, limit_batch, lang)}"
+                if model_label: cap+=f"\nModel: {model_label}"
+                if wm_on and wm_text: cap+=f"\n\n{wm_text}"
+                sent=await message.answer_photo(BufferedInputFile(img_bytes, filename=f"image_{idx+1}.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
+
+            try:
+                rfid=sent.photo[-1].file_id
+            except Exception:
+                rfid=None
             try:
                 async with db._pool.acquire() as con:
-                    await con.execute("UPDATE generations SET model_id=$2 WHERE id=$1", gen_id, active_model["id"])
+                    gen_id=await con.fetchval("INSERT INTO generations (user_id,kind,prompt,size,success,result_file_id,style_id,model_id,batch_id,negative_prompt,seed,ref_file_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id",
+                                              message.from_user.id,"generate",final_prompt,size,True,rfid,style_id if style_id!="none" else None, active_model["id"] if active_model else None, batch_id, negative or None, cur_seed, ref_file_id)
             except Exception:
-                pass
-
-        if result_file_id and gen_id:
-            try:
-                await sent.edit_caption(
-                    caption=caption_base,
-                    reply_markup=ui.result_menu(lang, gen_id=gen_id, file_id=result_file_id)
-                )
-            except Exception:
-                pass
-
+                gen_id=await db.log_generation(message.from_user.id,"generate",final_prompt,size,True,result_file_id=rfid, style_id=style_id if style_id!="none" else None)
+            if rfid and gen_id:
+                try:
+                    await sent.edit_caption(caption=cap, reply_markup=ui.result_menu(lang, gen_id=gen_id, file_id=rfid))
+                except Exception:
+                    pass
+            produced+=1
+            if batch>1 and idx<batch-1:
+                await asyncio.sleep(1.2)
+        if batch>1 and produced>0:
+            await message.answer(t("batch_done", lang, n=produced), reply_markup=ui.back_menu(lang))
     except Exception as e:
-        # normalize ProviderError or CubenceError
-        err_text = str(e)
-        # if old cubence error fallback
         try:
-            await db.log_generation(message.from_user.id, "generate", final_prompt, size, False, style_id=style_id if style_id != "none" else None)
+            await db.log_generation(message.from_user.id,"generate",final_prompt,size,False)
         except Exception:
             pass
-        await message.answer(t("gen_failed", lang, err=err_text[:500]), reply_markup=ui.back_menu(lang))
+        await message.answer(t("gen_failed", lang, err=str(e)[:500]), reply_markup=ui.back_menu(lang))
     finally:
-        if (await db.get_setting("feat_queue_enabled", "1")) == "1":
+        if (await db.get_setting("feat_queue_enabled","1"))=="1":
             await QUEUE.release(message.from_user.id)
-        await animator.stop()
         try:
+            await animator.stop()
             await status.delete()
         except Exception:
             pass
 
-
 @router.message(Command("generate"))
 async def cmd_generate(message: Message):
-    prompt = message.text.partition(" ")[2].strip()
+    prompt=message.text.partition(" ")[2].strip()
     if not prompt:
         await message.answer(ui.prompt_ask(await db.get_lang(message.from_user.id)))
         return
-    enhance = False
+    enhance=False
     if prompt.startswith("✨ "):
-        enhance = True
-        prompt = prompt[2:].strip()
+        enhance=True
+        prompt=prompt[2:].strip()
     await _do_generate(message, prompt, enhance=enhance)
-
 
 @router.message(Command("enhance"))
 async def cmd_enhance(message: Message):
-    lang = await db.get_lang(message.from_user.id)
+    lang=await db.get_lang(message.from_user.id)
     if not await ff.enhance_enabled():
         await message.answer(t("feature_disabled", lang), reply_markup=ui.back_menu(lang))
         return
-    prompt = message.text.partition(" ")[2].strip()
+    prompt=message.text.partition(" ")[2].strip()
     if not prompt:
-        await message.answer(t("enhance_doing", lang) + "\n\n" + ui.prompt_ask(lang))
+        await message.answer(t("enhance_doing", lang)+"\n\n"+ui.prompt_ask(lang))
         return
     await _do_generate(message, prompt, enhance=True)
 
-
 @router.callback_query(F.data.startswith("enhance:"))
 async def cb_enhance(callback: CallbackQuery):
-    lang = await db.get_lang(callback.from_user.id)
+    lang=await db.get_lang(callback.from_user.id)
     if not await ff.enhance_enabled():
         await callback.answer(t("feature_disabled", lang), show_alert=True)
         return
     try:
-        gen_id = int(callback.data.split(":")[1])
+        gen_id=int(callback.data.split(":")[1])
     except Exception:
         await callback.answer(t("invalid_data", lang), show_alert=True)
         return
-    gen = await db.get_generation_by_id(gen_id)
+    gen=await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt"):
         await callback.answer(t("invalid_data", lang), show_alert=True)
         return
     await callback.answer("Enhancing...")
     await _do_generate(callback.message, gen["prompt"], enhance=True)
 
-
 @router.message(GenerateStates.waiting_prompt, F.text, ~F.text.startswith("/"))
 async def fsm_prompt(message: Message, state: FSMContext):
-    data = await state.get_data()
-    enhance = data.get("enhance", False)
+    data=await state.get_data()
     await state.clear()
-    await _do_generate(message, message.text.strip(), enhance=enhance)
+    await _do_generate(message, message.text.strip(), enhance=data.get("enhance", False))
 
+@router.message(GenerateStates.waiting_negative, F.text)
+async def fsm_negative(message: Message, state: FSMContext):
+    lang=await db.get_lang(message.from_user.id)
+    txt=message.text.strip()
+    if txt in ("/clear","/hapus","clear"):
+        await db.set_pref_negative(message.from_user.id, "")
+        await state.clear()
+        await message.answer(t("adv_cleared", lang), reply_markup=ui.back_menu(lang))
+        return
+    # sanitize negative: strip html tags
+    import re
+    txt=re.sub(r"<[^>]+>", "", txt)[:500]
+    await db.set_pref_negative(message.from_user.id, txt)
+    await state.clear()
+    await message.answer(t("adv_neg_saved", lang, val=txt[:100] if "val" in t("adv_neg_saved", lang) else txt[:100]), reply_markup=ui.back_menu(lang))
+
+@router.message(GenerateStates.waiting_seed, F.text)
+async def fsm_seed(message: Message, state: FSMContext):
+    lang=await db.get_lang(message.from_user.id)
+    txt=message.text.strip()
+    if txt.lower() in ("/clear","/random","/hapus","random","clear"):
+        await db.set_pref_seed(message.from_user.id, None)
+        await state.clear()
+        await message.answer(t("adv_seed_cleared", lang), reply_markup=ui.back_menu(lang))
+        return
+    seed_val="".join([c for c in txt if c.isdigit()])[:16] or txt[:32]
+    await db.set_pref_seed(message.from_user.id, seed_val)
+    await state.clear()
+    await message.answer(t("adv_seed_saved", lang, seed=seed_val), reply_markup=ui.back_menu(lang))
+
+@router.message(GenerateStates.waiting_ref_photo, F.photo)
+async def fsm_ref_photo(message: Message, state: FSMContext):
+    lang=await db.get_lang(message.from_user.id)
+    fid=message.photo[-1].file_id
+    await db.set_pref_ref_file_id(message.from_user.id, fid)
+    await state.clear()
+    await message.answer(t("adv_ref_saved", lang), reply_markup=ui.back_menu(lang))
+
+@router.message(GenerateStates.waiting_ref_photo, F.text)
+async def fsm_ref_clear(message: Message, state: FSMContext):
+    lang=await db.get_lang(message.from_user.id)
+    if message.text.strip().lower() in ("/clear","/hapus","clear","hapus"):
+        await db.set_pref_ref_file_id(message.from_user.id, None)
+        await state.clear()
+        await message.answer(t("adv_ref_cleared", lang), reply_markup=ui.back_menu(lang))
+        return
+    await message.answer(t("adv_ref_ask", lang))
 
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def free_text_prompt(message: Message):
+    # Avoid responding in groups for random chat
+    if message.chat.type!="private":
+        return
     await _do_generate(message, message.text.strip())

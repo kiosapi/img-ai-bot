@@ -1,3 +1,7 @@
+# ---- Build / deploy archives (never commit) ----
+deploy_*.tar.gz
+*.tar.gz
+
 # ---- Secrets (NEVER commit) ----
 .env
 *.env

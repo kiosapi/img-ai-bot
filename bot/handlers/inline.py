@@ -1,24 +1,49 @@
-"""Inline mode: myworks gallery + switch_pm for new prompts."""
+"""Inline mode: myworks gallery + switch_pm for new prompts. Subscription gate + ban check fixed."""
 from aiogram import Router
 from aiogram.types import InlineQuery, InlineQueryResultCachedPhoto, InlineQueryResultArticle, InputTextMessageContent
-
 import db
+from config import REQUIRED_CHANNEL, ADMIN_IDS
 
 router = Router()
-
 PAGE_LIMIT = 20
 
+async def _ok_user(bot, user_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return True
+    try:
+        maint = await db.get_setting("maintenance", "0")
+        if maint=="1":
+            return False
+    except Exception:
+        pass
+    try:
+        if await db.is_banned(user_id):
+            return False
+    except Exception:
+        pass
+    if REQUIRED_CHANNEL:
+        try:
+            member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+            if member.status not in {"member","administrator","creator"}:
+                return False
+        except Exception:
+            pass
+    return True
 
 @router.inline_query()
 async def handle_inline(inline: InlineQuery):
+    if not await _ok_user(inline.bot, inline.from_user.id):
+        await inline.answer([], cache_time=1, is_personal=True)
+        return
     user_id = inline.from_user.id
     q = (inline.query or "").strip()
 
-    # If empty or 'recent' -> show myworks gallery (zero storage, file_id based)
     if not q or q.lower() in ("recent", "my", "myworks", "karya"):
         gens = await db.get_user_generations(user_id, limit=PAGE_LIMIT, offset=0)
         results = []
         for g in gens:
+            if g.get("user_id")!=user_id:
+                continue
             fid = g.get("result_file_id")
             if not fid:
                 continue
@@ -31,20 +56,15 @@ async def handle_inline(inline: InlineQuery):
                 caption=f"🖼️ {prompt}\nvia @{(await inline.bot.get_me()).username}",
             ))
         if not results:
-            # no history -> switch_pm prompt to create
-            await inline.answer(
-                [], switch_pm_text="🎨 Buat gambar pertama kamu", switch_pm_parameter="inline_empty"
-            )
+            await inline.answer([], switch_pm_text="🎨 Buat gambar pertama kamu", switch_pm_parameter="inline_empty")
             return
         await inline.answer(results, cache_time=5, is_personal=True)
         return
 
-    # Query with prompt -> cannot generate in inline (10s timeout), so offer switch_pm to create it
     bot_user = await inline.bot.get_me()
     prompt = q[:200]
-    # Also show matching history if any (simple contains filter)
     gens = await db.get_user_generations(user_id, limit=50, offset=0)
-    filtered = [g for g in gens if prompt.lower() in (g.get("prompt") or "").lower()][:10]
+    filtered = [g for g in gens if g.get("user_id")==user_id and prompt.lower() in (g.get("prompt") or "").lower()][:10]
 
     results = []
     for g in filtered:
@@ -60,28 +80,15 @@ async def handle_inline(inline: InlineQuery):
             caption=f"🖼️ {p}\nvia @{bot_user.username}",
         ))
 
-    # always add create-new article that switches to PM
-    # encode prompt into start param: max 64 chars, base64url not safe, so truncate and pass raw with gen_ prefix
-    # Telegram limits switch_pm_parameter to 64 chars, so trim
-    param = f"gen_{prompt[:40]}".replace(" ", "_")[:64]
-    # sanitize: only A-Z a-z 0-9 _ -
     import re
+    param = f"gen_{prompt[:40]}".replace(" ", "_")[:64]
     param = re.sub(r"[^A-Za-z0-9_-]", "_", param)[:64] or "inline_new"
 
     results.insert(0, InlineQueryResultArticle(
         id="create_new",
         title=f"🎨 Buat \"{prompt}\" di bot",
         description="Tap untuk generate gambar baru di PM",
-        input_message_content=InputTextMessageContent(
-            message_text=f"🎨 Prompt: {prompt}\n\nBuka @{bot_user.username} untuk generate gambar ini!"
-        ),
-        # Note: switch_pm via answer switch_pm_text, not per-result
+        input_message_content=InputTextMessageContent(message_text=f"🎨 Prompt: {prompt}\n\nBuka @{bot_user.username} untuk generate gambar ini!"),
     ))
 
-    await inline.answer(
-        results,
-        cache_time=2,
-        is_personal=True,
-        switch_pm_text=f"✨ Generate \"{prompt[:25]}...\"",
-        switch_pm_parameter=param
-    )
+    await inline.answer(results, cache_time=2, is_personal=True, switch_pm_text=f"✨ Generate \"{prompt[:25]}...\"", switch_pm_parameter=param)

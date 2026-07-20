@@ -6,17 +6,11 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tool
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/controls";
-
-const stat = (icon: any, label: string, color: string) => ({ icon, label, color });
-const STATS = [
-  stat(Users, "Total User", "text-blue-500"),
-  stat(ImageIcon, "Gambar Hari Ini", "text-emerald-500"),
-  stat(Zap, "User Aktif", "text-amber-500"),
-  stat(TrendingUp, "Total Gambar", "text-violet-500"),
-];
+import { useLang } from "@/lib/i18n";
 
 export default function Home() {
   const router = useRouter();
+  const { t, lang } = useLang();
   const [data, setData] = useState<any>(null);
   const [chart, setChart] = useState<any[]>([]);
 
@@ -26,30 +20,37 @@ export default function Home() {
       .catch(() => router.push("/login"));
   }, [router]);
 
-  if (!data) return <div className="py-20 text-center text-muted-foreground">Memuat...</div>;
+  if (!data) return <div className="py-20 text-center text-muted-foreground">{t("common.loading")}</div>;
+
+  const STATS_META = [
+    { icon: Users, key: "dash.total_users", color: "text-blue-500" },
+    { icon: ImageIcon, key: "dash.today_gens", color: "text-emerald-500" },
+    { icon: Zap, key: "dash.active_today", color: "text-amber-500" },
+    { icon: TrendingUp, key: "dash.total_gens", color: "text-violet-500" },
+  ];
   const values = [data.total_users, data.today_gen, data.active_today, data.total_gen];
 
   return (
     <div className="flex flex-col gap-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">Ringkasan aktivitas bot</p>
+        <h1 className="text-2xl font-bold tracking-tight">{t("dash.title")}</h1>
+        <p className="text-sm text-muted-foreground">{t("dash.sub")}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {STATS.map((s, i) => (
-          <Card key={i}>
+        {STATS_META.map((s, i) => (
+          <Card key={s.key}>
             <CardContent className="pt-5">
               <s.icon className={`h-6 w-6 ${s.color}`} />
               <div className="mt-3 text-3xl font-extrabold tracking-tight">{values[i]}</div>
-              <div className="mt-1 text-sm text-muted-foreground">{s.label}</div>
+              <div className="mt-1 text-sm text-muted-foreground">{t(s.key)}</div>
             </CardContent>
           </Card>
         ))}
       </div>
 
       <Card>
-        <CardHeader><CardTitle><TrendingUp className="h-4 w-4" />Aktivitas 7 Hari</CardTitle></CardHeader>
+        <CardHeader><CardTitle><TrendingUp className="h-4 w-4" />{t("dash.chart_7d")}</CardTitle></CardHeader>
         <CardContent>
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={chart} margin={{ left: -20, right: 8, top: 8 }}>
@@ -63,16 +64,16 @@ export default function Home() {
               <XAxis dataKey="day" stroke="var(--muted-foreground)" fontSize={12} tickLine={false} axisLine={false} />
               <YAxis stroke="var(--muted-foreground)" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
               <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 12, fontSize: 13 }} />
-              <Area type="monotone" dataKey="gen" name="Gambar" stroke="var(--primary)" strokeWidth={3} fill="url(#g)" />
+              <Area type="monotone" dataKey="gen" name={t("analytics.images")} stroke="var(--primary)" strokeWidth={3} fill="url(#g)" />
             </AreaChart>
           </ResponsiveContainer>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle><Zap className="h-4 w-4" />Aktivitas Terbaru</CardTitle></CardHeader>
+        <CardHeader><CardTitle><Zap className="h-4 w-4" />{t("dash.recent_activity")}</CardTitle></CardHeader>
         <CardContent className="flex flex-col">
-          {data.recent.length === 0 && <div className="py-8 text-center text-sm text-muted-foreground">Belum ada aktivitas</div>}
+          {data.recent.length === 0 && <div className="py-8 text-center text-sm text-muted-foreground">{t("dash.no_activity")}</div>}
           {data.recent.map((g: any, i: number) => (
             <div key={i} className="flex items-center gap-3 border-b py-3 last:border-0">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-violet-500 text-sm font-bold text-white">
@@ -82,9 +83,7 @@ export default function Home() {
                 <div className="truncate text-sm font-semibold">{g.username ? "@" + g.username : g.user_id}</div>
                 <div className="truncate text-xs text-muted-foreground">{g.kind} · {(g.prompt || "").slice(0, 40)}</div>
               </div>
-              {g.success
-                ? <Badge variant="success"><CheckCircle2 className="h-3 w-3" />ok</Badge>
-                : <Badge variant="destructive"><XCircle className="h-3 w-3" />gagal</Badge>}
+              {g.success ? <Badge variant="success"><CheckCircle2 className="h-3 w-3" /> ok</Badge> : <Badge variant="destructive"><XCircle className="h-3 w-3" /> {lang === "id" ? "gagal" : "fail"}</Badge>}
             </div>
           ))}
         </CardContent>

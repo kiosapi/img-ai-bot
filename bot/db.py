@@ -159,6 +159,14 @@ async def _create_schema():
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_checkin DATE;")
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS streak INT NOT NULL DEFAULT 0;")
         await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS total_checkin INT NOT NULL DEFAULT 0;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_batch INT NOT NULL DEFAULT 1;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_negative TEXT;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_seed TEXT;")
+        await con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pref_ref_file_id TEXT;")
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS batch_id TEXT;")
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS negative_prompt TEXT;")
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS seed TEXT;")
+        await con.execute("ALTER TABLE generations ADD COLUMN IF NOT EXISTS ref_file_id TEXT;")
         # aiogram FSM PG persistent storage
         await con.execute("""
             CREATE TABLE IF NOT EXISTS aiogram_states (
@@ -273,6 +281,20 @@ async def _create_schema():
             ON CONFLICT (id) DO NOTHING;
             """
         )
+        await con.execute(
+            """
+            INSERT INTO providers (id, name, base_url, is_active)
+            VALUES ('apikeyfun', 'ApiKeyFun', 'https://api.apikey.fun/v1', false)
+            ON CONFLICT (id) DO NOTHING;
+            """
+        )
+        await con.execute(
+            """
+            INSERT INTO providers (id, name, base_url, is_active)
+            VALUES ('unity2', 'Unity2', 'https://api.unity2.ai/v1', false)
+            ON CONFLICT (id) DO NOTHING;
+            """
+        )
 
 
 # ---------- users ----------
@@ -321,6 +343,64 @@ async def get_pref_size(user_id: int, default: str) -> str:
 async def set_pref_size(user_id: int, size: str):
     async with _pool.acquire() as con:
         await con.execute("UPDATE users SET pref_size=$2 WHERE user_id=$1", user_id, size)
+
+
+# ---------- new production prefs: batch, negative, seed, ref photo ----------
+
+async def get_pref_batch(user_id: int, default: int = 1) -> int:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT pref_batch FROM users WHERE user_id=$1", user_id)
+        v = row["pref_batch"] if row and row["pref_batch"] else default
+        try:
+            iv = int(v)
+            return iv if iv in (1, 2, 4) else default
+        except Exception:
+            return default
+
+
+async def set_pref_batch(user_id: int, batch: int):
+    batch = int(batch) if batch in (1, 2, 4) else 1
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE users SET pref_batch=$2 WHERE user_id=$1", user_id, batch)
+
+
+async def get_pref_negative(user_id: int) -> str:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT pref_negative FROM users WHERE user_id=$1", user_id)
+        return (row["pref_negative"] or "") if row else ""
+
+
+async def set_pref_negative(user_id: int, negative: str):
+    async with _pool.acquire() as con:
+        await con.execute("UPDATE users SET pref_negative=$2 WHERE user_id=$1", user_id, (negative or "")[:500])
+
+
+async def get_pref_seed(user_id: int) -> str | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT pref_seed FROM users WHERE user_id=$1", user_id)
+        return (row["pref_seed"] or None) if row else None
+
+
+async def set_pref_seed(user_id: int, seed: str | None):
+    async with _pool.acquire() as con:
+        if seed is None or str(seed).strip() == "":
+            await con.execute("UPDATE users SET pref_seed=NULL WHERE user_id=$1", user_id)
+        else:
+            await con.execute("UPDATE users SET pref_seed=$2 WHERE user_id=$1", user_id, str(seed).strip()[:32])
+
+
+async def get_pref_ref_file_id(user_id: int) -> str | None:
+    async with _pool.acquire() as con:
+        row = await con.fetchrow("SELECT pref_ref_file_id FROM users WHERE user_id=$1", user_id)
+        return row["pref_ref_file_id"] if row and row["pref_ref_file_id"] else None
+
+
+async def set_pref_ref_file_id(user_id: int, file_id: str | None):
+    async with _pool.acquire() as con:
+        if not file_id:
+            await con.execute("UPDATE users SET pref_ref_file_id=NULL WHERE user_id=$1", user_id)
+        else:
+            await con.execute("UPDATE users SET pref_ref_file_id=$2 WHERE user_id=$1", user_id, file_id)
 
 
 # ---------- language ----------
@@ -473,6 +553,65 @@ async def try_consume_daily_quota(user_id: int, limit: int) -> tuple[bool, int]:
             )
             return True, new_row["count"]
 
+
+async def check_and_consume_multi(user_id: int, free_fallback: int, count: int = 1) -> tuple[bool, int, int, bool]:
+    """Atomic multi-consume for batch: reserve count quota atomically or fail.
+    Uses advisory lock + bonus fallback split. Returns (allowed, used_after, limit, used_bonus).
+    If daily enough, consume all. Else if bonus covers remainder, consume daily remainder + bonus remainder.
+    """
+    count = max(1, min(int(count), 10))
+    limit = await effective_daily_limit(user_id, free_fallback)
+    if limit == 0:
+        # unlimited
+        async with _pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO usage_daily (user_id, day, count) VALUES ($1,$2,$3) "
+                "ON CONFLICT (user_id, day) DO UPDATE SET count = usage_daily.count + $3",
+                user_id, date.today(), count,
+            )
+        used = await get_today_count(user_id)
+        return True, used, limit, False
+    async with _pool.acquire() as con:
+        async with con.transaction():
+            await con.execute("SELECT pg_advisory_xact_lock($1)", user_id)
+            tday = date.today()
+            await con.execute(
+                "INSERT INTO usage_daily (user_id, day, count) VALUES ($1,$2,0) "
+                "ON CONFLICT (user_id, day) DO NOTHING",
+                user_id, tday,
+            )
+            row = await con.fetchrow(
+                "SELECT count FROM usage_daily WHERE user_id=$1 AND day=$2 FOR UPDATE",
+                user_id, tday,
+            )
+            cur = row["count"] if row else 0
+            remaining_daily = max(0, limit - cur)
+            if remaining_daily >= count:
+                new_row = await con.fetchrow(
+                    "UPDATE usage_daily SET count = count + $2 WHERE user_id=$1 AND day=$2 RETURNING count",
+                    user_id, count, tday,
+                )
+                return True, new_row["count"], limit, False
+            # not enough daily — check bonus
+            bonus_row = await con.fetchrow(
+                "SELECT bonus_quota FROM users WHERE user_id=$1 FOR UPDATE", user_id)
+            bonus = bonus_row["bonus_quota"] if bonus_row else 0
+            need_total = count
+            need_from_bonus = need_total - remaining_daily
+            if bonus >= need_from_bonus:
+                # consume remaining daily first
+                if remaining_daily > 0:
+                    await con.execute(
+                        "UPDATE usage_daily SET count = count + $2 WHERE user_id=$1 AND day=$2",
+                        user_id, remaining_daily, tday,
+                    )
+                await con.execute(
+                    "UPDATE users SET bonus_quota = bonus_quota - $2 WHERE user_id=$1",
+                    user_id, need_from_bonus,
+                )
+                new_used = cur + remaining_daily
+                return True, new_used, limit, True
+            return False, cur, limit, False
 
 async def check_and_consume_atomic(user_id: int, free_fallback: int) -> tuple[bool, int, int, bool]:
     """Atomic wrapper combining limit resolution + bonus fallback.

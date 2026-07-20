@@ -1,30 +1,21 @@
-"""Minimal i18n layer: id (default) + en. Auto-detected from Telegram language_code,
-stored per-user in DB, and switchable anytime from the menu.
-
-Usage:
-    from i18n import t
-    t("welcome", lang, name="Budi")
-"""
-
+"""Minimal i18n layer: id (default) + en."""
 TEXTS: dict[str, dict[str, str]] = {
     "id": {
-        # ---- generic ----
         "back_home": "◀️ Menu Utama",
         "back": "◀️ Kembali",
         "cancel": "❌ Batal",
         "saved": "Tersimpan ✓",
         "maintenance": "🛠️ <b>Bot sedang maintenance</b>\nCoba lagi beberapa saat ya.",
         "invalid_data": "Data tidak valid",
-
-        # ---- welcome / menu ----
         "welcome": (
             "✨ <b>Halo, {name}!</b>\n\n"
             "Selamat datang di <b>{brand}</b> — bikin & edit gambar pakai AI langsung dari Telegram.\n\n"
             "🎨 <b>Buat Gambar</b> — ketik ide, jadi gambar\n"
             "🖌️ <b>Edit Foto</b> — kirim foto + instruksi\n"
-            "📐 <b>Ukuran</b> — atur rasio gambar\n"
-            "📊 <b>Kuota</b> — cek sisa pemakaian harian\n"
-            "💰 <b>Saldo</b> — top up buat beli premium\n\n"
+            "📐 <b>Ukuran</b> — 7 rasio, Story/Wide/Square\n"
+            "🔢 <b>Jumlah</b> — 1/2/4 sekaligus\n"
+            "⚙️ <b>Advanced</b> — negative, seed, foto ref\n"
+            "🖼️ <b>Karya</b> — gallery grid thumbnail\n\n"
             "Pilih menu di bawah untuk mulai 👇"
         ),
         "menu_gen": "🎨 Buat Gambar",
@@ -38,7 +29,28 @@ TEXTS: dict[str, dict[str, str]] = {
         "menu_referral": "🎁 Ajak Teman",
         "menu_help": "❓ Bantuan",
         "menu_lang": "🌐 Bahasa",
-
+        "menu_checkin": "📅 Check-in",
+        "menu_batch": "🔢 Jumlah",
+        "menu_adv": "⚙️ Advanced",
+        "batch_pick": "🔢 <b>Pilih jumlah gambar per generate</b>\n\n1 = hemat kuota, 4 = variasi langsung",
+        "batch_set": "✅ Jumlah diset ke {n} gambar",
+        "adv_title": "⚙️ <b>Advanced Settings</b>\n\nKelola negative, seed, dan foto referensi untuk hasil lebih presisi.",
+        "adv_neg": "🚫 Negative Prompt",
+        "adv_neg_set": "🚫 Neg: ON",
+        "adv_seed": "🎲 Seed",
+        "adv_seed_set": "🎲 Seed: ON",
+        "adv_ref": "🖼️ Foto Referensi",
+        "adv_ref_set": "🖼️ Ref: ON",
+        "adv_clear": "🗑️ Hapus Advanced",
+        "adv_cleared": "✅ Advanced dibersihkan",
+        "adv_neg_ask": "🚫 Kirim negative prompt (yang tidak ingin muncul) — contoh: blurry, low quality, text, watermark. Kirim /clear untuk hapus:",
+        "adv_neg_saved": "✅ Negative disimpan: {val}",
+        "adv_seed_ask": "🎲 Kirim seed (angka penentu acak). Sama seed = hasil mirip. Kirim /clear /random untuk random:",
+        "adv_seed_saved": "✅ Seed disimpan: {seed}",
+        "adv_seed_cleared": "✅ Seed di-random kembali",
+        "adv_ref_ask": "🖼️ Kirim foto referensi untuk image-to-image, atau /clear untuk hapus. Bot akan pakai foto ini sebagai basis generate.",
+        "adv_ref_saved": "✅ Foto referensi disimpan! Generate berikutnya akan pakai foto ini.",
+        "adv_ref_cleared": "✅ Referensi dihapus",
         "help": (
             "❓ <b>Panduan Pemakaian</b>\n\n"
             "🎨 <b>Buat gambar dari teks</b>\n"
@@ -47,31 +59,31 @@ TEXTS: dict[str, dict[str, str]] = {
             "🖌️ <b>Edit / ubah foto</b>\n"
             "Kirim sebuah <b>foto</b> disertai <b>caption</b> instruksi.\n"
             "Contoh caption: <i>ganti background jadi pantai senja</i>\n\n"
-            "📐 <b>Ukuran</b> — pilih rasio: persegi, potret, atau lanskap\n"
-            "📊 <b>Kuota</b> — lihat sisa jatah harianmu\n"
-            "💰 <b>Saldo</b> — top up saldo buat beli paket premium instan\n\n"
+            "📐 <b>Ukuran</b> — 7 pilihan: 1:1 Square, 9:16 Story, 16:9 Wide, 2:3, 3:2, 3:4, 4:3\n"
+            "🔢 <b>Jumlah</b> — pilih 1, 2, atau 4 gambar sekaligus\n"
+            "🚫 <b>Negative</b> — hal yang tidak mau muncul (misal: blurry, text)\n"
+            "🎲 <b>Seed</b> — kunci acak biar hasil bisa direproduksi\n"
+            "🖼️ <b>Foto Ref</b> — upload foto jadi basis image-to-image\n"
+            "🖼️ <b>Karya Saya</b> — gallery grid thumbnail + batch group\n\n"
             "💡 <b>Tips:</b> makin detail prompt, makin bagus hasilnya!"
         ),
-
         "prompt_ask": (
             "🎨 <b>Buat Gambar</b>\n\n"
             "Ketik deskripsi gambar yang kamu mau (balas pesan ini):\n"
             "<i>contoh: robot lucu main skateboard, gaya 3D render</i>\n\n"
-            "💡 <i>Gunakan <b>Gaya</b> di menu untuk pilih preset style!</i>"
+            "💡 <i>Gunakan <b>Gaya</b> / <b>Ukuran</b> / <b>Advanced</b> di menu!</i>"
         ),
         "edit_ask": (
             "🖌️ <b>Edit Foto</b>\n\n"
             "Balas pesan ini dengan mengirim <b>foto</b> yang mau diedit beserta <b>instruksi</b> (sebagai caption foto).\n"
             "<i>contoh: jadikan gaya lukisan cat air</i>"
         ),
-        "size_pick": "📐 <b>Pilih Ukuran Gambar</b>",
+        "size_pick": "📐 <b>Pilih Ukuran Gambar</b>\n\n7 rasio tersedia — pilih sesuai kebutuhan (Story, Square, Wide dll)",
         "size_set": "✅ Ukuran diset ke <b>{size}</b>",
         "size_saved": "Ukuran tersimpan ✓",
         "size_square": "⬜ Persegi (1:1)",
         "size_portrait": "📱 Potret (2:3)",
         "size_landscape": "🖥️ Lanskap (3:2)",
-
-        # ---- quota ----
         "quota_title": "📊 <b>Kuota Harian</b>\n",
         "quota_status_premium": "👑 <b>Status:</b> Premium — {plan}\n⏳ Aktif s/d <b>{until}</b>\n",
         "quota_status_free": "🆓 <b>Status:</b> Free\n",
@@ -83,8 +95,6 @@ TEXTS: dict[str, dict[str, str]] = {
         "quota_unlimited": "♾️ tanpa batas",
         "quota_images": "{n} gambar",
         "quota_exhausted": "🚫 <b>Kuota harian habis</b> ({used}/{limit})\n{bar}\n\nReset otomatis besok 🔄",
-
-        # ---- generate/edit results ----
         "generating": "🎨 <b>Membuat gambar...</b>\n⏳ Mohon tunggu sebentar ({used}/{limit})",
         "editing": "🖌️ <b>Mengedit gambar...</b>\n⏳ Mohon tunggu sebentar ({used}/{limit})",
         "gen_done": "✅ <b>Gambar selesai!</b>\n\n📝 <i>{prompt}</i>\n📐 {size}  ·  📊 Sisa {left}",
@@ -98,16 +108,12 @@ TEXTS: dict[str, dict[str, str]] = {
         "result_edit_this": "🖌️ Edit",
         "result_hd": "🔍 HD",
         "result_style": "🎨 Gaya",
-
-        # ---- subscription gate ----
         "join_channel": "📢 Join Channel",
         "already_joined": "✅ Sudah Join",
         "join_success": "✅ <b>Berhasil!</b> Kamu sudah join. Selamat berkreasi 🎨",
         "join_not_detected": "Belum terdeteksi join {channel}. Coba lagi.",
         "join_required": "🔒 Untuk memakai bot ini, kamu harus join channel kami dulu.\n\nJoin {channel} lalu tekan <b>Sudah Join</b>.",
         "join_not_joined": "Kamu belum join channel.",
-
-        # ---- premium ----
         "upgrade_no_plans": "💎 <b>Upgrade Premium</b>\n\nMaaf, saat ini belum ada paket yang tersedia. Coba lagi nanti ya 🙏",
         "upgrade_intro": "💎 <b>Upgrade ke Premium</b>\n\nDapatkan <b>kuota lebih banyak</b> setiap hari!\nBayar instan pakai <b>Saldo</b> 👇",
         "plan_unavailable": "Paket tidak tersedia",
@@ -138,46 +144,25 @@ TEXTS: dict[str, dict[str, str]] = {
             "💰 Sisa saldo: <b>{balance}</b>\n\n"
             "Terima kasih sudah upgrade! Selamat berkreasi 🎨"
         ),
-
-        # ---- balance / deposit ----
         "balance_title": "💰 <b>Saldo Saya</b>\n\nSaldo kamu saat ini:\n<b>{balance}</b>",
         "balance_topup_button": "➕ Top Up Saldo",
         "balance_history_button": "🧾 Riwayat Deposit",
         "deposit_disabled": "💰 <b>Top Up Saldo</b>\n\nFitur top up saldo sedang tidak tersedia. Coba lagi nanti ya 🙏",
-        "deposit_pick_amount": (
-            "💰 <b>Top Up Saldo</b>\n\n"
-            "Pilih nominal top up (min {min}, maks {max}):"
-        ),
+        "deposit_pick_amount": "💰 <b>Top Up Saldo</b>\n\nPilih nominal top up (min {min}, maks {max}):",
         "deposit_custom_button": "✏️ Nominal Lain",
         "deposit_custom_ask": "✏️ Ketik nominal top up yang kamu mau (angka saja, min {min}, maks {max}):",
         "deposit_custom_invalid": "❌ Nominal tidak valid. Ketik angka saja, contoh: 50000",
         "deposit_custom_range": "❌ Nominal harus antara {min} dan {max}.",
         "deposit_pick_method": "💰 <b>Top Up {amount}</b>\n\nPilih metode pembayaran 👇",
-        "deposit_info": (
-            "🧾 <b>Deposit #{id}</b>\n\n"
-            "💰 Nominal: <b>{amount}</b>\n\n"
-            "{method_label} — <b>{method_name}</b>"
-        ),
+        "deposit_info": "🧾 <b>Deposit #{id}</b>\n\n💰 Nominal: <b>{amount}</b>\n\n{method_label} — <b>{method_name}</b>",
         "deposit_account_number": "📌 Nomor/ID: <code>{v}</code>",
         "deposit_account_name": "👤 Atas nama: <b>{v}</b>",
         "deposit_instructions": "\nℹ️ {v}",
-        "deposit_after": (
-            "\n📸 <b>Setelah transfer</b>, kirim <b>foto bukti pembayaran</b> ke chat ini.\n"
-            "Admin akan verifikasi & saldo masuk otomatis setelah disetujui ✅"
-        ),
+        "deposit_after": "\n📸 <b>Setelah transfer</b>, kirim <b>foto bukti pembayaran</b> ke chat ini.\nAdmin akan verifikasi & saldo masuk otomatis setelah disetujui ✅",
         "deposit_cancel_button": "❌ Batalkan Deposit",
         "deposit_cancelled": "❌ Deposit dibatalkan.",
-        "deposit_proof_received": (
-            "✅ <b>Bukti top up diterima!</b>\n\n"
-            "Depositmu sedang <b>diverifikasi admin</b>. Kamu akan dapat notifikasi begitu disetujui 🔔\n\n"
-            "Biasanya diproses dalam beberapa menit s/d jam kerja."
-        ),
-        "deposit_approved": (
-            "🎉 <b>Top up berhasil!</b>\n\n"
-            "💰 Nominal: <b>{amount}</b>\n"
-            "💳 Saldo sekarang: <b>{balance}</b>\n\n"
-            "Terima kasih! 🙏"
-        ),
+        "deposit_proof_received": "✅ <b>Bukti top up diterima!</b>\n\nDepositmu sedang <b>diverifikasi admin</b>.",
+        "deposit_approved": "🎉 <b>Top up berhasil!</b>\n\n💰 Nominal: <b>{amount}</b>\n💳 Saldo sekarang: <b>{balance}</b>\n\nTerima kasih! 🙏",
         "deposit_rejected": "❌ <b>Deposit ditolak</b>\n\nMaaf, top up tidak dapat diverifikasi.",
         "order_rejected": "❌ <b>Pembayaran ditolak</b>\n\nMaaf, pembayaranmu tidak dapat diverifikasi.",
         "deposit_history_empty": "🧾 <b>Riwayat Deposit</b>\n\nBelum ada riwayat deposit.",
@@ -185,22 +170,15 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_pending": "menunggu",
         "status_approved": "disetujui",
         "status_rejected": "ditolak",
-
-        # ---- style presets ----
         "style_title": "🎨 <b>Pilih Gaya Gambar</b>\n\nPilih gaya visual untuk gambar kamu. Gaya akan otomatis ditambahkan ke prompt.\n\nGaya aktif: <b>{current}</b>",
         "style_set": "✅ Gaya diset ke <b>{style}</b>",
         "style_none": "Default (tanpa gaya tambahan)",
-
-        # ---- my works ----
-        "myworks_title": "🖼️ <b>Karya Saya</b>\n\nTotal: <b>{total}</b> gambar\nMenampilkan {shown} karya terbaru 👇",
+        "myworks_title": "🖼️ <b>Karya Saya</b>\n\nTotal: <b>{total}</b> gambar — gallery grid preview\nMenampilkan {shown} karya terbaru 👇",
         "myworks_empty": "🖼️ <b>Karya Saya</b>\n\nKamu belum punya karya. Buat gambar dulu yuk 🎨",
         "myworks_prev": "◀️ Sebelumnya",
         "myworks_next": "▶️ Selanjutnya",
         "myworks_view": "🖼️ <b>Karya #{id}</b>\n\n📝 <i>{prompt}</i>\n📐 {size} · {kind} · {date}",
         "myworks_regen_hint": "Gunakan tombol di bawah untuk buat ulang, variasi, atau edit.",
-
-        # ---- check-in ----
-        "menu_checkin": "📅 Check-in",
         "checkin_title": "📅 <b>Daily Check-in</b>\n\n🔥 Streak: <b>{streak}</b> hari\n📊 Total check-in: <b>{total}</b>\n\nCheck-in setiap hari dapat bonus kuota!\nHari ke-3 = +2, ke-7 = +5, 30 hari = +20!",
         "checkin_status": "Streak {streak} · Total {total} · {can}",
         "checkin_can": "belum check-in hari ini",
@@ -209,11 +187,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "checkin_already": "✅ Kamu sudah check-in hari ini!\n\n🔥 Streak: {streak} hari. Balik lagi besok ya!",
         "checkin_toast": "🎁 Dapat +{bonus} kuota!",
         "checkin_button": "✅ Check-in Hari Ini",
-
-        # ---- queue ----
         "busy_generating": "⏳ Kamu masih dalam proses generate/edit. Tunggu selesai dulu ya!",
-
-        # ---- enhance / batch / watermark / sticker (10,14,15,17) ----
         "feature_disabled": "🚫 Fitur ini sedang dimatikan admin.",
         "menu_sticker": "🎖️ Sticker",
         "menu_model": "🤖 Model",
@@ -225,6 +199,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "enhance_done": "✨ <b>Prompt Enhanced</b>\n\nSebelum: <i>{before}</i>\nSesudah: <i>{after}</i>\n\nGenerate dengan prompt baru?",
         "batch_generating": "🎲 <b>Batch x{n}</b> generating... sisa kuota {used}/{limit}",
         "batch_done_item": "🎲 <b>Batch {idx}/{total}</b>\n📝 {prompt}\n📐 {size}",
+        "batch_done": "✅ Batch selesai: {n} gambar",
         "batch_usage": "🎲 <b>Batch Generate</b>\n\nGunakan: /batch <n> <prompt>\nContoh: /batch 4 kucing astronot\n\nLimit kamu: <b>{free}</b> per batch (premium {prem})",
         "sticker_intro": "🎖️ <b>Sticker Pack Generator</b>\n\nUbah karya kamu jadi sticker Telegram!\nMax per pack: <b>{max}</b>\nPack kamu: <code>{pack}</code>\n\nPilih karya dari /myworks → tombol 🎖️ Sticker → akan ditambah ke pack kamu.\nLink pack: https://t.me/addstickers/{pack}",
         "sticker_added": "✅ Ditambah ke pack <code>{pack}</code>\n🔗 {link}",
@@ -232,13 +207,10 @@ TEXTS: dict[str, dict[str, str]] = {
         "sticker_full": "🚫 Pack penuh (max {max}). Buat pack baru di dashboard.",
         "sticker_dl_fail": "❌ Gagal download gambar: {err}",
         "sticker_create_fail": "❌ Gagal buat sticker: {err}",
-
         "model_no_models": "Tidak ada model aktif. Hubungi admin.",
         "model_pick": "🤖 <b>Pilih Model Gambar</b>\n\nPilih model favoritmu. Model ini akan dipakai untuk semua generasimu:",
         "model_set": "Model diatur ke {model} ✅",
         "model_inactive": "Model tidak aktif",
-
-        # ---- referral ----
         "referral_text": (
             "🎁 <b>Ajak Teman</b>\n\n"
             "Bagikan link referral kamu ke teman. Setiap teman yang join lewat link ini "
@@ -253,29 +225,12 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "referral_reward_balance": "Saldo {amount}",
         "referral_reward_quota": "{n} kuota gambar tambahan",
-
-        # ---- language ----
         "lang_pick": "🌐 <b>Pilih Bahasa / Choose Language</b>",
         "lang_id": "🇮🇩 Indonesia",
         "lang_en": "🇬🇧 English",
         "lang_set": "✅ Bahasa diubah ke <b>Indonesia</b>",
-
-        # ---- admin heads-up ----
-        "order_note": (
-            "🔔 <b>Order baru #{id}</b>\n\n"
-            "👤 {uname} (<code>{uid}</code>)\n"
-            "💎 Paket: <b>{plan}</b>\n"
-            "💰 {amount}\n"
-            "💳 {method}\n\n"
-            "📸 Bukti terlampir. Buka dashboard untuk verifikasi ✅"
-        ),
-        "deposit_note": (
-            "🔔 <b>Deposit baru #{id}</b>\n\n"
-            "👤 {uname} (<code>{uid}</code>)\n"
-            "💰 Nominal: <b>{amount}</b>\n"
-            "💳 {method}\n\n"
-            "📸 Bukti terlampir. Buka dashboard untuk verifikasi ✅"
-        ),
+        "order_note": "🔔 <b>Order baru #{id}</b>\n\n👤 {uname} (<code>{uid}</code>)\n💎 Paket: <b>{plan}</b>\n💰 {amount}\n💳 {method}\n\n📸 Bukti terlampir. Buka dashboard untuk verifikasi ✅",
+        "deposit_note": "🔔 <b>Deposit baru #{id}</b>\n\n👤 {uname} (<code>{uid}</code>)\n💰 Nominal: <b>{amount}</b>\n💳 {method}\n\n📸 Bukti terlampir. Buka dashboard untuk verifikasi ✅",
     },
     "en": {
         "back_home": "◀️ Main Menu",
@@ -284,15 +239,15 @@ TEXTS: dict[str, dict[str, str]] = {
         "saved": "Saved ✓",
         "maintenance": "🛠️ <b>Bot is under maintenance</b>\nPlease try again shortly.",
         "invalid_data": "Invalid data",
-
         "welcome": (
             "✨ <b>Hi, {name}!</b>\n\n"
             "Welcome to <b>{brand}</b> — create & edit images with AI right from Telegram.\n\n"
             "🎨 <b>Generate Image</b> — type an idea, get an image\n"
             "🖌️ <b>Edit Photo</b> — send a photo + instructions\n"
-            "📐 <b>Size</b> — set the image aspect ratio\n"
-            "📊 <b>Quota</b> — check your daily usage\n"
-            "💰 <b>Balance</b> — top up to buy premium\n\n"
+            "📐 <b>Size</b> — 7 ratios Story/Wide/Square\n"
+            "🔢 <b>Batch</b> — 1/2/4 at once\n"
+            "⚙️ <b>Advanced</b> — negative, seed, ref photo\n"
+            "🖼️ <b>My Works</b> — gallery grid preview\n\n"
             "Pick a menu below to get started 👇"
         ),
         "menu_gen": "🎨 Generate Image",
@@ -306,7 +261,28 @@ TEXTS: dict[str, dict[str, str]] = {
         "menu_referral": "🎁 Invite Friends",
         "menu_help": "❓ Help",
         "menu_lang": "🌐 Language",
-
+        "menu_checkin": "📅 Check-in",
+        "menu_batch": "🔢 Batch",
+        "menu_adv": "⚙️ Advanced",
+        "batch_pick": "🔢 <b>Choose batch count per generation</b>\n\n1 = save quota, 4 = instant variations",
+        "batch_set": "✅ Batch set to {n} images",
+        "adv_title": "⚙️ <b>Advanced Settings</b>\n\nManage negative, seed, and reference photo for precise results.",
+        "adv_neg": "🚫 Negative Prompt",
+        "adv_neg_set": "🚫 Neg: ON",
+        "adv_seed": "🎲 Seed",
+        "adv_seed_set": "🎲 Seed: ON",
+        "adv_ref": "🖼️ Reference Photo",
+        "adv_ref_set": "🖼️ Ref: ON",
+        "adv_clear": "🗑️ Clear Advanced",
+        "adv_cleared": "✅ Advanced cleared",
+        "adv_neg_ask": "🚫 Send negative prompt (what you don't want) — e.g. blurry, low quality, text, watermark. Send /clear to remove:",
+        "adv_neg_saved": "✅ Negative saved: {val}",
+        "adv_seed_ask": "🎲 Send seed (random determiner). Same seed = similar result. Send /clear /random for random:",
+        "adv_seed_saved": "✅ Seed saved: {seed}",
+        "adv_seed_cleared": "✅ Seed randomized",
+        "adv_ref_ask": "🖼️ Send reference photo for image-to-image, or /clear to remove. Bot will use this photo as base.",
+        "adv_ref_saved": "✅ Reference photo saved! Next generate will use it.",
+        "adv_ref_cleared": "✅ Reference cleared",
         "help": (
             "❓ <b>How to Use</b>\n\n"
             "🎨 <b>Generate image from text</b>\n"
@@ -314,30 +290,22 @@ TEXTS: dict[str, dict[str, str]] = {
             "<code>/generate an astronaut cat on the moon</code>\n\n"
             "🖌️ <b>Edit / modify a photo</b>\n"
             "Send a <b>photo</b> with a <b>caption</b> as instruction.\n"
-            "Example caption: <i>change background to a sunset beach</i>\n\n"
-            "📐 <b>Size</b> — choose ratio: square, portrait, or landscape\n"
-            "📊 <b>Quota</b> — check your remaining daily allowance\n"
-            "💰 <b>Balance</b> — top up to buy premium plans instantly\n\n"
+            "📐 <b>Size</b> — 7 choices: 1:1 Square, 9:16 Story, 16:9 Wide, 2:3, 3:2, 3:4, 4:3\n"
+            "🔢 <b>Batch</b> — 1,2,4 images at once\n"
+            "🚫 <b>Negative</b> — what you don't want (blurry, text)\n"
+            "🎲 <b>Seed</b> — lock randomness for reproducibility\n"
+            "🖼️ <b>Ref Photo</b> — upload photo as img2img base\n"
+            "🖼️ <b>My Works</b> — gallery grid thumbnail\n\n"
             "💡 <b>Tip:</b> the more detailed your prompt, the better the result!"
         ),
-
-        "prompt_ask": (
-            "🎨 <b>Generate Image</b>\n\n"
-            "Type a description of the image you want (reply to this message):\n"
-            "<i>example: a cute robot skateboarding, 3D render style</i>"
-        ),
-        "edit_ask": (
-            "🖌️ <b>Edit Photo</b>\n\n"
-            "Reply to this message by sending the <b>photo</b> you want to edit with your <b>instructions</b> as its caption.\n"
-            "<i>example: turn it into a watercolor painting</i>"
-        ),
-        "size_pick": "📐 <b>Choose Image Size</b>",
+        "prompt_ask": "🎨 <b>Generate Image</b>\n\nType a description of the image you want (reply to this message):\n<i>example: a cute robot skateboarding, 3D render style</i>",
+        "edit_ask": "🖌️ <b>Edit Photo</b>\n\nReply to this message by sending the <b>photo</b> you want to edit with your <b>instructions</b> as its caption.\n<i>example: turn it into a watercolor painting</i>",
+        "size_pick": "📐 <b>Choose Image Size</b>\n\n7 ratios available — Story, Square, Wide etc",
         "size_set": "✅ Size set to <b>{size}</b>",
         "size_saved": "Size saved ✓",
         "size_square": "⬜ Square (1:1)",
         "size_portrait": "📱 Portrait (2:3)",
         "size_landscape": "🖥️ Landscape (3:2)",
-
         "quota_title": "📊 <b>Daily Quota</b>\n",
         "quota_status_premium": "👑 <b>Status:</b> Premium — {plan}\n⏳ Active until <b>{until}</b>\n",
         "quota_status_free": "🆓 <b>Status:</b> Free\n",
@@ -349,7 +317,6 @@ TEXTS: dict[str, dict[str, str]] = {
         "quota_unlimited": "♾️ unlimited",
         "quota_images": "{n} images",
         "quota_exhausted": "🚫 <b>Daily quota reached</b> ({used}/{limit})\n{bar}\n\nResets automatically tomorrow 🔄",
-
         "generating": "🎨 <b>Generating image...</b>\n⏳ Please wait a moment ({used}/{limit})",
         "editing": "🖌️ <b>Editing image...</b>\n⏳ Please wait a moment ({used}/{limit})",
         "gen_done": "✅ <b>Image done!</b>\n\n📝 <i>{prompt}</i>\n📐 {size}  ·  📊 Left {left}",
@@ -363,83 +330,45 @@ TEXTS: dict[str, dict[str, str]] = {
         "result_edit_this": "🖌️ Edit",
         "result_hd": "🔍 HD",
         "result_style": "🎨 Style",
-
         "join_channel": "📢 Join Channel",
         "already_joined": "✅ Already Joined",
         "join_success": "✅ <b>Success!</b> You've joined. Happy creating 🎨",
         "join_not_detected": "Couldn't detect you joining {channel}. Try again.",
         "join_required": "🔒 To use this bot, you must join our channel first.\n\nJoin {channel} then tap <b>Already Joined</b>.",
         "join_not_joined": "You haven't joined the channel yet.",
-
         "upgrade_no_plans": "💎 <b>Upgrade Premium</b>\n\nSorry, no plans are available right now. Please check back later 🙏",
         "upgrade_intro": "💎 <b>Upgrade to Premium</b>\n\nGet <b>more daily quota</b>!\nPay instantly with <b>Balance</b> 👇",
         "plan_unavailable": "Plan unavailable",
         "plan_unlimited": "Unlimited",
         "plan_per_day": "{n}/day",
-        "plan_detail": (
-            "💎 <b>{name} Plan</b>\n\n"
-            "💰 Price: <b>{price}</b>\n"
-            "📊 Quota: <b>{limit}</b>\n"
-            "⏳ Duration: <b>{days} days</b>"
-        ),
+        "plan_detail": "💎 <b>{name} Plan</b>\n\n💰 Price: <b>{price}</b>\n📊 Quota: <b>{limit}</b>\n⏳ Duration: <b>{days} days</b>",
         "plan_detail_desc": "\n📝 {desc}",
         "plan_balance_line": "\n💰 Your balance: <b>{balance}</b>",
         "plan_buy_button": "💳 Buy with Balance ({price})",
         "plan_insufficient": "Insufficient balance",
-        "plan_topup_needed": (
-            "⚠️ <b>Insufficient balance</b>\n\n"
-            "Your balance: <b>{balance}</b>\nPlan price: <b>{price}</b>\nShortfall: <b>{diff}</b>\n\n"
-            "Please top up your balance first."
-        ),
+        "plan_topup_needed": "⚠️ <b>Insufficient balance</b>\n\nYour balance: <b>{balance}</b>\nPlan price: <b>{price}</b>\nShortfall: <b>{diff}</b>\n\nPlease top up your balance first.",
         "plan_topup_button": "💰 Top Up Balance",
         "plan_bought": "🎉 Plan purchased!",
-        "premium_activated": (
-            "🎉 <b>Congrats! Your Premium is active!</b>\n\n"
-            "💎 Plan: <b>{plan}</b>\n"
-            "📊 Quota: <b>{limit}</b>\n"
-            "⏳ Valid until: <b>{until}</b>\n"
-            "💰 Remaining balance: <b>{balance}</b>\n\n"
-            "Thanks for upgrading! Happy creating 🎨"
-        ),
-
+        "premium_activated": "🎉 <b>Congrats! Your Premium is active!</b>\n\n💎 Plan: <b>{plan}</b>\n📊 Quota: <b>{limit}</b>\n⏳ Valid until: <b>{until}</b>\n💰 Remaining balance: <b>{balance}</b>\n\nThanks for upgrading! Happy creating 🎨",
         "balance_title": "💰 <b>My Balance</b>\n\nYour current balance:\n<b>{balance}</b>",
         "balance_topup_button": "➕ Top Up Balance",
         "balance_history_button": "🧾 Deposit History",
         "deposit_disabled": "💰 <b>Top Up Balance</b>\n\nTop-up is currently unavailable. Please check back later 🙏",
-        "deposit_pick_amount": (
-            "💰 <b>Top Up Balance</b>\n\n"
-            "Choose an amount (min {min}, max {max}):"
-        ),
+        "deposit_pick_amount": "💰 <b>Top Up Balance</b>\n\nChoose an amount (min {min}, max {max}):",
         "deposit_custom_button": "✏️ Custom Amount",
         "deposit_custom_ask": "✏️ Type the top-up amount you want (numbers only, min {min}, max {max}):",
         "deposit_custom_invalid": "❌ Invalid amount. Type numbers only, e.g. 50000",
         "deposit_custom_range": "❌ Amount must be between {min} and {max}.",
         "deposit_pick_method": "💰 <b>Top Up {amount}</b>\n\nChoose a payment method 👇",
-        "deposit_info": (
-            "🧾 <b>Deposit #{id}</b>\n\n"
-            "💰 Amount: <b>{amount}</b>\n\n"
-            "{method_label} — <b>{method_name}</b>"
-        ),
+        "deposit_info": "🧾 <b>Deposit #{id}</b>\n\n💰 Amount: <b>{amount}</b>\n\n{method_label} — <b>{method_name}</b>",
         "deposit_account_number": "📌 Number/ID: <code>{v}</code>",
         "deposit_account_name": "👤 Account name: <b>{v}</b>",
         "deposit_instructions": "\nℹ️ {v}",
-        "deposit_after": (
-            "\n📸 <b>After transferring</b>, send a <b>photo of your payment proof</b> to this chat.\n"
-            "Admin will verify & your balance will be topped up automatically once approved ✅"
-        ),
+        "deposit_after": "\n📸 <b>After transferring</b>, send a <b>photo of your payment proof</b> to this chat.\nAdmin will verify & your balance will be topped up automatically once approved ✅",
         "deposit_cancel_button": "❌ Cancel Deposit",
         "deposit_cancelled": "❌ Deposit cancelled.",
-        "deposit_proof_received": (
-            "✅ <b>Top-up proof received!</b>\n\n"
-            "Your deposit is being <b>reviewed by admin</b>. You'll be notified once approved 🔔\n\n"
-            "Usually processed within a few minutes to a few working hours."
-        ),
-        "deposit_approved": (
-            "🎉 <b>Top-up successful!</b>\n\n"
-            "💰 Amount: <b>{amount}</b>\n"
-            "💳 Current balance: <b>{balance}</b>\n\n"
-            "Thank you! 🙏"
-        ),
+        "deposit_proof_received": "✅ <b>Top-up proof received!</b>\n\nYour deposit is being <b>reviewed by admin</b>. You'll be notified once approved 🔔\n\nUsually processed within a few minutes to a few working hours.",
+        "deposit_approved": "🎉 <b>Top-up successful!</b>\n\n💰 Amount: <b>{amount}</b>\n💳 Current balance: <b>{balance}</b>\n\nThank you! 🙏",
         "deposit_rejected": "❌ <b>Deposit rejected</b>\n\nSorry, we couldn't verify your top-up.",
         "order_rejected": "❌ <b>Payment rejected</b>\n\nSorry, your payment could not be verified.",
         "deposit_history_empty": "🧾 <b>Deposit History</b>\n\nNo deposit history yet.",
@@ -447,19 +376,15 @@ TEXTS: dict[str, dict[str, str]] = {
         "status_pending": "pending",
         "status_approved": "approved",
         "status_rejected": "rejected",
-
         "style_title": "🎨 <b>Choose Image Style</b>\n\nPick a visual style for your images. It will be auto-appended to your prompt.\n\nActive: <b>{current}</b>",
         "style_set": "✅ Style set to <b>{style}</b>",
         "style_none": "Default (no extra style)",
-
-        "myworks_title": "🖼️ <b>My Creations</b>\n\nTotal: <b>{total}</b> images\nShowing {shown} latest 👇",
+        "myworks_title": "🖼️ <b>My Creations</b>\n\nTotal: <b>{total}</b> images — gallery grid preview\nShowing {shown} latest 👇",
         "myworks_empty": "🖼️ <b>My Creations</b>\n\nYou have no creations yet. Go make one 🎨",
         "myworks_prev": "◀️ Prev",
         "myworks_next": "▶️ Next",
         "myworks_view": "🖼️ <b>Creation #{id}</b>\n\n📝 <i>{prompt}</i>\n📐 {size} · {kind} · {date}",
         "myworks_regen_hint": "Use buttons below to regen, vary, or edit.",
-
-        "menu_checkin": "📅 Check-in",
         "checkin_title": "📅 <b>Daily Check-in</b>\n\n🔥 Streak: <b>{streak}</b> days\n📊 Total: <b>{total}</b>\n\nCheck in daily for bonus quota!\nDay 3 = +2, day 7 = +5, 30 days = +20!",
         "checkin_status": "Streak {streak} · Total {total} · {can}",
         "checkin_can": "not checked in today",
@@ -468,10 +393,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "checkin_already": "✅ Already checked in today!\n\n🔥 Streak: {streak} days. Come back tomorrow!",
         "checkin_toast": "🎁 +{bonus} quota!",
         "checkin_button": "✅ Check-in Today",
-
         "busy_generating": "⏳ You still have a generation in progress. Wait for it to finish!",
-
-        # ---- enhance / batch / watermark / sticker (10,14,15,17) ----
         "feature_disabled": "🚫 This feature is disabled by admin.",
         "menu_sticker": "🎖️ Sticker",
         "gen_placeholder": "Type image prompt...",
@@ -482,6 +404,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "enhance_done": "✨ <b>Prompt Enhanced</b>\n\nBefore: <i>{before}</i>\nAfter: <i>{after}</i>",
         "batch_generating": "🎲 <b>Batch x{n}</b> generating... quota {used}/{limit}",
         "batch_done_item": "🎲 <b>Batch {idx}/{total}</b>\n📝 {prompt}\n📐 {size}",
+        "batch_done": "✅ Batch done: {n} images",
         "batch_usage": "🎲 <b>Batch Generate</b>\n\nUse: /batch <n> <prompt>\nExample: /batch 4 cat astronaut\n\nYour limit: <b>{free}</b> per batch (premium {prem})",
         "sticker_intro": "🎖️ <b>Sticker Pack Generator</b>\n\nTurn your creations into Telegram stickers!\nMax per pack: <b>{max}</b>\nYour pack: <code>{pack}</code>\n\nPick artwork from /myworks → 🎖️ Sticker button → added to your pack.\nLink: https://t.me/addstickers/{pack}",
         "sticker_added": "✅ Added to pack <code>{pack}</code>\n🔗 {link}",
@@ -489,8 +412,10 @@ TEXTS: dict[str, dict[str, str]] = {
         "sticker_full": "🚫 Pack full (max {max}). Create new pack in dashboard.",
         "sticker_dl_fail": "❌ Failed to download image: {err}",
         "sticker_create_fail": "❌ Failed to create sticker: {err}",
-
-        # ---- referral ----
+        "model_no_models": "No active model active. Contact admin.",
+        "model_pick": "🤖 <b>Choose Image Model</b>\n\nPick your favorite model. This will be used for all your generations:",
+        "model_set": "Model set to {model} ✅",
+        "model_inactive": "Inactive model",
         "referral_text": (
             "🎁 <b>Invite Friends</b>\n\n"
             "Share your referral link with friends. Every friend who joins via this link "
@@ -499,43 +424,32 @@ TEXTS: dict[str, dict[str, str]] = {
             "🔗 <b>Your referral link:</b>\n<code>{link}</code>\n\n"
             "📊 <b>Stats</b>\n"
             "• Total invited: <b>{total}</b>\n"
-            "• Rewarded: <b>{rewarded}</b>\n"
-            "• Waiting for channel join: <b>{pending}</b>\n"
-            "• Remaining bonus images: <b>{bonus_quota}</b>"
+            "• Success (got bonus): <b>{rewarded}</b>\n"
+            "• Awaiting channel join: <b>{pending}</b>\n"
+            "• Remaining bonus image quota: <b>{bonus_quota}</b>"
         ),
         "referral_reward_balance": "Balance {amount}",
         "referral_reward_quota": "{n} extra image quota",
-
-        "model_no_models": "No active models available. Contact admin.",
-        "model_pick": "🤖 <b>Choose Image Model</b>\n\nPick your preferred model. It will be used for all your generations:",
-        "model_set": "Model set to {model} ✅",
-        "model_inactive": "Model is inactive",
-
-        "lang_pick": "🌐 <b>Choose Language / Pilih Bahasa</b>",
+        "lang_pick": "🌐 <b>Choose Language</b>",
         "lang_id": "🇮🇩 Indonesia",
         "lang_en": "🇬🇧 English",
-        "lang_set": "✅ Language switched to <b>English</b>",
-
-        "order_note": (
-            "🔔 <b>New order #{id}</b>\n\n"
-            "👤 {uname} (<code>{uid}</code>)\n"
-            "💎 Plan: <b>{plan}</b>\n"
-            "💰 {amount}\n"
-            "💳 {method}\n\n"
-            "📸 Proof attached. Open the dashboard to verify ✅"
-        ),
-        "deposit_note": (
-            "🔔 <b>New deposit #{id}</b>\n\n"
-            "👤 {uname} (<code>{uid}</code>)\n"
-            "💰 Amount: <b>{amount}</b>\n"
-            "💳 {method}\n\n"
-            "📸 Proof attached. Open the dashboard to verify ✅"
-        ),
+        "lang_set": "✅ Language changed to <b>English</b>",
+        "order_note": "🔔 <b>New order #{id}</b>\n\n👤 {uname} (<code>{uid}</code>)\n💎 Plan: <b>{plan}</b>\n💰 {amount}\n💳 {method}\n\n📸 Proof attached. Open dashboard to verify ✅",
+        "deposit_note": "🔔 <b>New deposit #{id}</b>\n\n👤 {uname} (<code>{uid}</code>)\n💰 Amount: <b>{amount}</b>\n💳 {method}\n\n📸 Proof attached. Open dashboard to verify ✅",
     },
 }
 
-
 def t(key: str, lang: str = "id", **kwargs) -> str:
-    lang = lang if lang in TEXTS else "id"
-    template = TEXTS[lang].get(key) or TEXTS["id"].get(key) or key
-    return template.format(**kwargs) if kwargs else template
+    d = TEXTS.get(lang if lang in TEXTS else "id", TEXTS["id"])
+    # fallback to id if not found in requested lang
+    txt = d.get(key)
+    if txt is None and lang != "id":
+        txt = TEXTS["id"].get(key, key)
+    if txt is None:
+        return key
+    try:
+        if kwargs:
+            return txt.format(**kwargs)
+        return txt
+    except Exception:
+        return txt

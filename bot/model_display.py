@@ -3,6 +3,8 @@
 SHORT_CODE = {
     "cubence": "CB",
     "rightcodes": "RC",
+    "apikeyfun": "AF",
+    "unity2": "UN",
 }
 
 def short_code(provider_id: str) -> str:

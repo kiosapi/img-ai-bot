@@ -89,29 +89,64 @@ class SubscriptionMiddleware(BaseMiddleware):
         if user is None:
             return await handler(event, data)
 
-        is_new = not await db.user_exists(user.id)
-        await db.upsert_user(user.id, user.username, user.first_name, user.language_code)
+        # Always record user first — even if gate blocks later
+        try:
+            is_new = not await db.user_exists(user.id)
+            await db.upsert_user(user.id, user.username, user.first_name, user.language_code)
+            if is_new and isinstance(event, Message) and event.text:
+                payload = event.text.partition(" ")[2].strip()
+                if payload.startswith("ref_"):
+                    try:
+                        referrer_id = int(payload[4:])
+                        await db.record_referral_signup(referrer_id, user.id)
+                    except ValueError:
+                        pass
+        except Exception:
+            is_new = False
 
-        if is_new and isinstance(event, Message) and event.text:
-            payload = event.text.partition(" ")[2].strip()
-            if payload.startswith("ref_"):
+        # If REQUIRED_CHANNEL empty or invalid, skip gate — don't block user growth
+        channel = (REQUIRED_CHANNEL or "").strip()
+        if not channel:
+            if is_new:
                 try:
-                    referrer_id = int(payload[4:])
-                    await db.record_referral_signup(referrer_id, user.id)
-                except ValueError:
+                    reward = await db.try_reward_referral(user.id)
+                    if reward:
+                        await _notify_referrer(bot, reward, user)
+                except Exception:
                     pass
+            return await handler(event, data)
 
-        if await is_subscribed(bot, user.id):
-            reward = await db.try_reward_referral(user.id)
-            if reward:
-                await _notify_referrer(bot, reward, user)
+        try:
+            subscribed = await is_subscribed(bot, user.id)
+        except Exception:
+            # On get_chat_member failure (private channel, bot not admin, invalid username)
+            # do NOT block — fail open so users table grows, else admin sees only 1 user
+            subscribed = True
+
+        if subscribed:
+            if is_new:
+                try:
+                    reward = await db.try_reward_referral(user.id)
+                    if reward:
+                        await _notify_referrer(bot, reward, user)
+                except Exception:
+                    pass
             return await handler(event, data)
 
         lang = await db.get_lang(user.id)
         text = t("join_required", lang, channel=REQUIRED_CHANNEL)
         if isinstance(event, CallbackQuery):
-            await event.answer(t("join_not_joined", lang), show_alert=True)
-            await event.message.answer(text, reply_markup=_join_keyboard(lang))
+            try:
+                await event.answer(t("join_not_joined", lang), show_alert=True)
+            except Exception:
+                pass
+            try:
+                await event.message.answer(text, reply_markup=_join_keyboard(lang))
+            except Exception:
+                pass
         elif isinstance(event, Message):
-            await event.answer(text, reply_markup=_join_keyboard(lang))
+            try:
+                await event.answer(text, reply_markup=_join_keyboard(lang))
+            except Exception:
+                pass
         return
