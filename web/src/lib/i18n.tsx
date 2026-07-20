@@ -14,6 +14,9 @@ const TRANSLATIONS: Dict = {
   "nav.referral": { id: "Referral", en: "Referral" },
   "nav.models": { id: "Models & Provider", en: "Models & Provider" },
   "nav.errors": { id: "Error", en: "Errors" },
+  "nav.logs": { id: "Live Logs", en: "Live Logs" },
+  "nav.system": { id: "System", en: "System" },
+  "nav.health": { id: "Bot Health", en: "Bot Health" },
   "nav.settings": { id: "Setting", en: "Settings" },
   "nav.audit": { id: "Audit Log", en: "Audit Log" },
   "nav.premium": { id: "Premium", en: "Premium" },
@@ -338,6 +341,11 @@ const TRANSLATIONS: Dict = {
   "common.no_data": { id: "Belum ada data", en: "No data" },
   "common.yes_delete": { id: "Ya, Hapus", en: "Yes, Delete" },
   "common.search": { id: "Cari...", en: "Search..." },
+
+  // Live Logs
+  "logs.title": { id: "Live Logs", en: "Live Logs" },
+  "logs.sub": { id: "Tail log bot/api/postgres - docker logs atau fallback DB", en: "Tail bot/api/postgres logs - docker logs or DB fallback" },
+  "nav.logs": { id: "Live Logs", en: "Live Logs" },
 };
 
 function getSavedLang(): Lang {

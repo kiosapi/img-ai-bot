@@ -8,6 +8,11 @@ import ipaddress
 import re
 import html as _html
 import time
+import platform
+import psutil
+import socket
+import datetime as _dt
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Annotated
 from fastapi import FastAPI, Request, Response, HTTPException, Depends
@@ -1100,3 +1105,618 @@ async def audit_logs(limit: int = 100, _: bool = Depends(require_auth)):
     async with _pool.acquire() as con:
         rows = await con.fetch("SELECT * FROM admin_audit ORDER BY id DESC LIMIT $1", limit)
     return {"logs": [dict(r) for r in rows]}
+
+# ---- Bot Health Center (Phase1 fit2) ----
+# Bot: heartbeat freshness + last gen + queue stuck + active users
+# Providers: latency check per provider (no key leak, just base_url connectivity)
+# System: restart-bot flag/trigger
+
+_bot_last_restart_flag_path = Path(os.environ.get("BOT_RESTART_FLAG", "/tmp/imgbot_restart_bot.flag"))
+_provider_health_cache: dict = {}
+_provider_health_cache_ts: float = 0.0
+
+def _parse_iso(s: str | None) -> _dt.datetime | None:
+    if not s:
+        return None
+    try:
+        # normalize Z etc
+        txt = s.strip()
+        if txt.endswith("Z"):
+            txt = txt[:-1] + "+00:00"
+        dt = _dt.datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+@app.get("/api/health/bot")
+async def health_bot(_: bool = Depends(require_auth)):
+    now = _dt.datetime.now(_dt.timezone.utc)
+    heartbeat_raw = await get_setting("bot_last_heartbeat", "")
+    heartbeat_dt = _parse_iso(heartbeat_raw)
+    online = False
+    age_sec = None
+    if heartbeat_dt:
+        age_sec = int((now - heartbeat_dt).total_seconds())
+        online = age_sec < 120  # <2m = online
+
+    async with _pool.acquire() as con:
+        last_gen = await con.fetchrow("SELECT id, user_id, kind, success, created_at FROM generations ORDER BY id DESC LIMIT 1")
+        gen_per_hour = await con.fetchval("SELECT count(*) FROM generations WHERE created_at > now() - interval '1 hour'") or 0
+        # queue stuck: generations? project has no queue table – we interpret stuck as:
+        # aiogram FSM states lingering >5m OR usage anomaly.
+        # For now, count aiogram_states with updated < now()-5m as potential stuck jobs, plus active fsm in memory not available here.
+        # So we query aiogram_states older than 5m.
+        try:
+            stuck_count = await con.fetchval("SELECT count(*) FROM aiogram_states WHERE updated < now() - interval '5 minutes'") or 0
+        except Exception:
+            stuck_count = 0
+        try:
+            active_users_5m = await con.fetchval("SELECT count(DISTINCT user_id) FROM generations WHERE created_at > now() - interval '5 minutes'") or 0
+        except Exception:
+            active_users_5m = 0
+        try:
+            total_users = await con.fetchval("SELECT count(*) FROM users") or 0
+        except Exception:
+            total_users = 0
+        try:
+            today_gen = await con.fetchval("SELECT count(*) FROM generations WHERE created_at::date = CURRENT_DATE") or 0
+        except Exception:
+            today_gen = 0
+
+    return {
+        "status": "online" if online else "offline",
+        "online": online,
+        "heartbeat_raw": heartbeat_raw or None,
+        "heartbeat_at": heartbeat_dt.isoformat() if heartbeat_dt else None,
+        "heartbeat_age_sec": age_sec,
+        "last_generation": dict(last_gen) if last_gen else None,
+        "gen_per_hour": int(gen_per_hour),
+        "today_gen": int(today_gen),
+        "queue_stuck_count": int(stuck_count),
+        "active_users_5m": int(active_users_5m),
+        "total_users": int(total_users),
+        "checked_at": now.isoformat(),
+    }
+
+@app.get("/api/health/providers")
+async def health_providers(_: bool = Depends(require_auth)):
+    # Ping latency per active provider: SELECT active models + measure httpx HEAD/GET base_url
+    # Never expose api keys
+    global _provider_health_cache, _provider_health_cache_ts
+    now_ts = time.time()
+    # optional 30s cache to avoid hammering providers
+    if _provider_health_cache and (now_ts - _provider_health_cache_ts) < 30:
+        # still return cached but indicate cached_at
+        return _provider_health_cache
+
+    async with _pool.acquire() as con:
+        prov_rows = await con.fetch("SELECT id, name, base_url, is_active FROM providers ORDER BY id")
+        # collect settings base_url overrides
+        settings_rows = await con.fetch("SELECT key, value FROM settings WHERE key LIKE '%_base_url'")
+        settings_map = {r["key"]: r["value"] for r in settings_rows}
+        model_rows = await con.fetch("SELECT provider_id, count(*) as cnt, count(*) FILTER (WHERE is_active) as active_cnt FROM ai_models GROUP BY provider_id")
+
+    model_map = {r["provider_id"]: {"total": r["cnt"], "active": r["active_cnt"]} for r in model_rows}
+    results = []
+    # measure latency concurrently
+    async def _ping_provider(pid: str, base_url: str):
+        url = (base_url or "").strip().rstrip("/")
+        if not url:
+            return {"latency_ms": None, "ok": False, "error": "no base_url"}
+        # don't send api key; just simple GET with short timeout, follow redirects
+        # try root / health / models endpoint lightweight
+        t0 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(6.0, connect=3.0), follow_redirects=True) as client:
+                # try HEAD first, then GET /models or base
+                try:
+                    # lightweight: GET base URL, expect 401/404 quickly still means reachable
+                    resp = await client.get(url, headers={"User-Agent": "imgbot-health/1.0"})
+                    # Consider reachable if we got any HTTP response (even 401/404)
+                    latency = int((time.time() - t0) * 1000)
+                    ok = resp.status_code < 500  # <500 reachable
+                    return {"latency_ms": latency, "ok": ok, "status_code": resp.status_code, "error": None if ok else f"http {resp.status_code}"}
+                except httpx.TimeoutException:
+                    return {"latency_ms": None, "ok": False, "error": "timeout"}
+                except httpx.ConnectError as ce:
+                    return {"latency_ms": None, "ok": False, "error": f"connect {str(ce)[:120]}"}
+        except Exception as e:
+            return {"latency_ms": None, "ok": False, "error": str(e)[:200]}
+
+    # run pings
+    ping_tasks = []
+    for p in prov_rows:
+        pid = p["id"]
+        b_url = settings_map.get(f"{pid}_base_url") or p["base_url"] or ""
+        ping_tasks.append((p, _ping_provider(pid, b_url)))
+
+    # sequential to avoid many concurrent outbound? do parallel though
+    # gather
+    gathered = []
+    for prov, coro in ping_tasks:
+        try:
+            res = await coro
+        except Exception as e:
+            res = {"latency_ms": None, "ok": False, "error": str(e)[:200]}
+        mm = model_map.get(prov["id"], {"total": 0, "active": 0})
+        gathered.append({
+            "id": prov["id"],
+            "name": prov["name"],
+            "base_url": prov["base_url"],
+            "resolved_base_url": settings_map.get(f"{prov['id']}_base_url") or prov["base_url"],
+            "is_active": bool(prov["is_active"]),
+            "models_total": int(mm["total"]),
+            "models_active": int(mm["active"]),
+            **res,
+        })
+
+    out = {"providers": gathered, "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(), "cached": False}
+    _provider_health_cache = out
+    _provider_health_cache_ts = now_ts
+    return out
+
+class RestartBotBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+    mode: str | None = Field(default="flag", max_length=20)  # flag | docker | log
+
+@app.post("/api/system/restart-bot")
+async def restart_bot(body: RestartBotBody | None = None, _: bool = Depends(require_auth)):
+    reason = (body.reason if body and body.reason else "admin dashboard restart").strip()[:500]
+    mode = (body.mode if body and body.mode else "flag").strip().lower()
+    details = []
+    flag_written = False
+    docker_attempted = False
+    docker_ok = False
+    docker_err = ""
+
+    # 1) always write flag file – external watcher / bot itself / systemd can poll
+    try:
+        _bot_last_restart_flag_path.parent.mkdir(parents=True, exist_ok=True)
+        content = f"{int(time.time())}\n{reason}\n{mode}\n"
+        _bot_last_restart_flag_path.write_text(content, encoding="utf-8")
+        flag_written = True
+        details.append(f"flag written {_bot_last_restart_flag_path}")
+    except Exception as e:
+        details.append(f"flag write failed: {e}")
+
+    # 2) try docker restart if mode==docker or auto-detect env var BOT_CONTAINER_NAME
+    container_name = os.environ.get("BOT_CONTAINER_NAME", "") or os.environ.get("LOG_CONTAINER_BOT", "imgbot-bot-1")
+    # allow comma list
+    candidates = [c.strip() for c in container_name.split(",") if c.strip()]
+    if mode == "docker" or (os.environ.get("ENABLE_DOCKER_RESTART", "0") == "1"):
+        docker_attempted = True
+        loop = asyncio.get_running_loop()
+
+        def _try_restart():
+            import subprocess as _sp
+            for cand in candidates[:3]:
+                try:
+                    out = _sp.check_output(["docker", "restart", cand], timeout=15, text=True, stderr=_sp.STDOUT)
+                    return True, cand, out.strip()[:500]
+                except Exception as ex:
+                    last = str(ex)[:500]
+                    continue
+            return False, candidates[0] if candidates else "unknown", last if candidates else "no candidates"
+
+        try:
+            docker_ok, used, out_msg = await loop.run_in_executor(None, _try_restart)
+            if docker_ok:
+                details.append(f"docker restart ok {used}: {out_msg}")
+            else:
+                docker_err = out_msg if 'out_msg' in locals() else "docker restart failed"
+                details.append(f"docker restart fail {used}: {docker_err}")
+        except Exception as e:
+            docker_err = str(e)[:500]
+            details.append(f"docker exec error: {docker_err}")
+
+    await audit_log("bot_restart", "-", f"mode={mode} flag={flag_written} docker_ok={docker_ok} reason={reason}")
+
+    return {
+        "ok": True,
+        "flag_written": flag_written,
+        "flag_path": str(_bot_last_restart_flag_path),
+        "docker_attempted": docker_attempted,
+        "docker_ok": docker_ok,
+        "docker_error": docker_err,
+        "details": details,
+        "reason": reason,
+        "note": "Flag file written. If docker mode, container restart attempted. For prod, ensure docker-compose or watcher monitors flag file and restarts bot service.",
+    }
+
+# ---- Live Logs Viewer ----
+import subprocess
+import shutil
+import logging
+
+LOG_CONTAINERS = {
+    "bot": os.environ.get("LOG_CONTAINER_BOT", "imgbot-bot-1,imgbot_bot_1,bot"),
+    "api": os.environ.get("LOG_CONTAINER_API", "imgbot-api-1,imgbot_api_1,api"),
+    "postgres": os.environ.get("LOG_CONTAINER_POSTGRES", "imgbot-postgres-1,imgbot_postgres_1,postgres"),
+    "web": os.environ.get("LOG_CONTAINER_WEB", "imgbot-web-1,imgbot_web_1,web"),
+}
+
+LOG_LEVEL_KEYWORDS = {
+    "error": ["error", "exception", "traceback", "failed", "fatal", "critical"],
+    "warn": ["warn", "warning", "deprecated"],
+    "info": ["info", "success", "started", "connected"],
+    "debug": ["debug"],
+}
+
+def _classify_level(line: str) -> str:
+    low = line.lower()
+    for kw in LOG_LEVEL_KEYWORDS["error"]:
+        if kw in low:
+            return "error"
+    for kw in LOG_LEVEL_KEYWORDS["warn"]:
+        if kw in low:
+            return "warn"
+    for kw in LOG_LEVEL_KEYWORDS["debug"]:
+        if kw in low:
+            return "debug"
+    return "info"
+
+def _try_docker_logs(container_names: list[str], lines: int) -> tuple[str, str | None, str]:
+    """Try docker logs, return (output, used_container, error)."""
+    if not shutil.which("docker"):
+        return "", None, "docker binary not found"
+    last_err = ""
+    for name in container_names:
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            # Use shell=False safe
+            result = subprocess.run(
+                ["docker", "logs", "--tail", str(lines), name],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            combined = (result.stdout + "\n" + result.stderr).strip()
+            if result.returncode == 0 or combined:
+                # Even if non-zero, some docker versions write logs to stderr
+                if combined:
+                    return combined, name, ""
+                if result.returncode == 0:
+                    return "", name, ""
+            last_err = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        except subprocess.TimeoutExpired:
+            last_err = f"timeout reading {name}"
+        except FileNotFoundError:
+            last_err = "docker not found"
+            break
+        except Exception as e:
+            last_err = str(e)[:300]
+    return "", None, last_err or "no container matched"
+
+@app.get("/api/logs/tail")
+async def logs_tail(
+    type: str = "bot",
+    lines: int = 200,
+    level: str = "all",
+    search: str = "",
+    _: bool = Depends(require_auth),
+):
+    # validation
+    type = (type or "bot").lower().strip()
+    if type not in ("bot", "api", "postgres", "web"):
+        type = "bot"
+    lines = max(1, min(500, int(lines or 200)))
+    level = (level or "all").lower().strip()
+    if level not in ("all", "info", "warn", "error", "debug"):
+        level = "all"
+    search = (search or "").strip()[:200]
+
+    container_spec = LOG_CONTAINERS.get(type, "")
+    container_list = [c.strip() for c in container_spec.split(",") if c.strip()]
+
+    logs_text = ""
+    used_container = None
+    source = "docker"
+    docker_err = ""
+
+    # attempt docker logs
+    logs_text, used_container, docker_err = _try_docker_logs(container_list, lines)
+
+    # fallback 1: try reading log files if docker failed
+    if not logs_text:
+        fallback_paths = [
+            f"/var/log/{type}.log",
+            f"/tmp/{type}.log",
+            f"./{type}.log",
+            f"/app/{type}.log",
+            "./bot.log",
+            "./api.log",
+        ]
+        # bot logs often at /app/bot.log or cwd
+        for p in fallback_paths:
+            try:
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                        all_lines = fh.readlines()
+                        logs_text = "".join(all_lines[-lines:])
+                        if logs_text:
+                            source = f"file:{p}"
+                            break
+            except Exception:
+                continue
+
+    # fallback 2: DB errors table / generations + audit
+    if not logs_text:
+        try:
+            async with _pool.acquire() as con:
+                if type == "bot":
+                    rows = await con.fetch(
+                        "SELECT id, created_at, user_id, prompt, success FROM generations ORDER BY id DESC LIMIT $1",
+                        lines,
+                    )
+                    formatted = []
+                    for r in rows:
+                        status = "ERROR" if not r["success"] else "INFO"
+                        ts = r["created_at"].isoformat() if r["created_at"] else ""
+                        prompt_snip = (r["prompt"] or "")[:120]
+                        formatted.append(f"{ts} [{status}] user={r['user_id']} kind=gen prompt={prompt_snip} success={r['success']}")
+                    logs_text = "\n".join(formatted) if formatted else "no generation logs in DB"
+                    source = "db:generations"
+                elif type == "api":
+                    rows = await con.fetch(
+                        "SELECT id, ts, action, target, detail FROM admin_audit ORDER BY id DESC LIMIT $1",
+                        lines,
+                    )
+                    formatted = []
+                    for r in rows:
+                        ts = r["ts"].isoformat() if r["ts"] else ""
+                        lvl = "WARN" if "fail" in (r["action"] or "").lower() else "INFO"
+                        formatted.append(f"{ts} [{lvl}] {r['action']} target={r['target']} detail={r['detail'][:200]}")
+                    logs_text = "\n".join(formatted) if formatted else "no audit logs"
+                    source = "db:admin_audit"
+                elif type == "postgres":
+                    rows = await con.fetch(
+                        "SELECT pid, query, state, now() - query_start AS dur FROM pg_stat_activity WHERE datname = current_database() AND state != 'idle' ORDER BY query_start DESC LIMIT 20"
+                    )
+                    formatted = [f"[INFO] Postgres activity: {len(rows)} active queries"]
+                    for r in rows:
+                        q = (r["query"] or "")[:200].replace("\n", " ")
+                        formatted.append(f"pid={r['pid']} dur={r['dur']} state={r['state']} query={q}")
+                    logs_text = "\n".join(formatted) if formatted else "postgres stats empty"
+                    source = "db:pg_stat"
+                else:
+                    logs_text = "no logs available for web in non-docker env - fallback to audit"
+                    rows = await con.fetch("SELECT id, ts, action, detail FROM admin_audit ORDER BY id DESC LIMIT $1", lines)
+                    formatted = [f"{r['ts']} [{r['action']}] {str(r['detail'] or '')[:200]}" for r in rows]
+                    logs_text = "\n".join(formatted) if formatted else logs_text
+                    source = "db:fallback"
+        except Exception as e:
+            if not logs_text:
+                logs_text = f"fallback also failed: {e} | docker_err={docker_err}"
+                source = "error"
+
+        if docker_err and logs_text and "fallback" in source:
+            logs_text = f"# docker_err: {docker_err}\n# source: {source}\n" + logs_text
+
+    # parse into structured lines
+    raw_lines = [l for l in logs_text.splitlines() if l.strip() != ""]
+    # classify + filter
+    output = []
+    for idx, ln in enumerate(raw_lines[-lines:]):
+        lvl = _classify_level(ln)
+        if level != "all" and lvl != level:
+            # allow warn to include error? no strict
+            if not (level == "warn" and lvl == "error"):
+                continue
+        if search and search.lower() not in ln.lower():
+            continue
+        output.append({"line": ln[:2000], "level": lvl, "idx": idx})
+
+    return {
+        "type": type,
+        "lines_requested": lines,
+        "lines_returned": len(output),
+        "source": source,
+        "container": used_container,
+        "docker_error": docker_err if not used_container else "",
+        "logs": output,
+        "raw": logs_text[:20000] if level == "all" and not search else None,
+    }
+
+# ---- System Monitor (Phase1 fit1) ----
+# Non-blocking psutil via thread executor; never leaks env / BOT_TOKEN / DATABASE_URL
+def _sync_psutil_snapshot():
+    # blocking-ish calls isolated here to run in executor
+    cpu = psutil.cpu_percent(interval=0.3)
+    cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
+    vm = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    # load avg (optional, not on Windows)
+    try:
+        load1, load5, load15 = psutil.getloadavg()
+    except Exception:
+        try:
+            import os as _os2
+            load1, load5, load15 = _os2.getloadavg()  # type: ignore
+        except Exception:
+            load1 = load5 = load15 = 0.0
+    boot_ts = psutil.boot_time()
+    uptime_sec = int(time.time() - boot_ts)
+    net = psutil.net_io_counters()
+    procs = len(psutil.pids())
+    # python process own mem
+    self_proc = psutil.Process()
+    self_mem = self_proc.memory_info()
+    return {
+        "cpu_percent": cpu,
+        "cpu_per_core": cpu_per_core,
+        "cpu_count_logical": psutil.cpu_count(logical=True),
+        "cpu_count_physical": psutil.cpu_count(logical=False),
+        "memory": {
+            "total": vm.total,
+            "available": vm.available,
+            "used": vm.used,
+            "free": vm.free,
+            "percent": vm.percent,
+        },
+        "disk": {
+            "total": disk.total,
+            "used": disk.used,
+            "free": disk.free,
+            "percent": disk.percent,
+        },
+        "load_avg": {"1m": load1, "5m": load5, "15m": load15},
+        "boot_time": boot_ts,
+        "uptime_seconds": uptime_sec,
+        "uptime_human": str(_dt.timedelta(seconds=uptime_sec)),
+        "net_io": {"bytes_sent": net.bytes_sent, "bytes_recv": net.bytes_recv, "packets_sent": net.packets_sent, "packets_recv": net.packets_recv} if net else {},
+        "process_count": procs,
+        "self_memory": {"rss": self_mem.rss, "vms": self_mem.vms},
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "version": platform.version()[:200],
+            "machine": platform.machine(),
+            "hostname": socket.gethostname()[:100],
+            "python": platform.python_version(),
+        },
+    }
+
+async def _get_system_metrics_nonblocking() -> dict:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_psutil_snapshot)
+
+@app.get("/api/system/metrics")
+async def system_metrics(_: bool = Depends(require_auth)):
+    # CPU + MEM + DISK + uptime – metric utama dashboard widget
+    try:
+        snap = await _get_system_metrics_nonblocking()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"psutil failed: {e}")
+    return {
+        "ok": True,
+        "ts": int(time.time()),
+        **snap,
+    }
+
+async def _get_postgres_stats() -> dict:
+    # Never expose connection string or env
+    out = {
+        "db_size_bytes": 0,
+        "db_size_human": "0",
+        "tables": {},
+        "row_counts": {},
+        "pg_stat_activity_count": 0,
+        "pg_max_connections": 0,
+    }
+    try:
+        async with _pool.acquire() as con:
+            # db size
+            db_size = await con.fetchval("SELECT pg_database_size(current_database())")
+            out["db_size_bytes"] = int(db_size or 0)
+            # human: pg_size_pretty but avoid overhead
+            pretty = await con.fetchval("SELECT pg_size_pretty($1)", db_size)
+            out["db_size_human"] = pretty or f"{db_size} B"
+
+            # top tables by total size (whitelisted query, no params from user)
+            trows = await con.fetch(
+                "SELECT relname AS table_name, pg_total_relation_size(c.oid) AS total_bytes, pg_size_pretty(pg_total_relation_size(c.oid)) AS total_pretty, pg_relation_size(c.oid) AS data_bytes "
+                "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname='public' AND c.relkind='r' ORDER BY total_bytes DESC LIMIT 20"
+            )
+            for r in trows:
+                out["tables"][r["table_name"]] = {
+                    "total_bytes": int(r["total_bytes"] or 0),
+                    "total_pretty": r["total_pretty"],
+                    "data_bytes": int(r["data_bytes"] or 0),
+                }
+
+            # row counts for key tables – tolerant if table missing
+            for tbl in ["users", "generations", "orders", "deposits", "plans", "payment_methods", "balance_logs", "referrals", "usage_daily", "admin_sessions", "broadcast_history", "ai_models", "providers"]:
+                try:
+                    cnt = await con.fetchval(f"SELECT count(*) FROM {tbl}")
+                    out["row_counts"][tbl] = int(cnt or 0)
+                except Exception:
+                    out["row_counts"][tbl] = -1  # tabel tidak ada
+
+            try:
+                conn_cnt = await con.fetchval("SELECT count(*) FROM pg_stat_activity")
+                out["pg_stat_activity_count"] = int(conn_cnt or 0)
+            except Exception:
+                pass
+            try:
+                max_conn_str = await con.fetchval("SHOW max_connections")
+                out["pg_max_connections"] = int(max_conn_str or 0)
+            except Exception:
+                pass
+    except Exception as e:
+        out["error"] = str(e)[:300]
+    return out
+
+@app.get("/api/system/stats")
+async def system_stats(_: bool = Depends(require_auth)):
+    pg = await _get_postgres_stats()
+    snap = await _get_system_metrics_nonblocking()
+    # ringkas disk/cpu/ram + pg
+    return {
+        "ok": True,
+        "ts": int(time.time()),
+        "cpu_percent": snap["cpu_percent"],
+        "cpu_per_core": snap["cpu_per_core"],
+        "cpu_count": snap["cpu_count_logical"],
+        "memory": snap["memory"],
+        "disk": snap["disk"],
+        "load_avg": snap["load_avg"],
+        "uptime_seconds": snap["uptime_seconds"],
+        "uptime_human": snap["uptime_human"],
+        "boot_time": snap["boot_time"],
+        "platform": snap["platform"],
+        "postgres": pg,
+    }
+
+@app.get("/api/system/docker")
+async def system_docker(_: bool = Depends(require_auth)):
+    # optional docker socket check; fallback safe if not present
+    docker_sock = Path("/var/run/docker.sock")
+    items = []
+    if docker_sock.exists():
+        # try docker via stdlib socket http over unix – best-effort, never crash
+        try:
+            import json as _json2
+            import http.client as _httpc
+            conn = _httpc.HTTPConnection("localhost", timeout=2)
+            # cannot connect via unix directly with http.client; use raw socket
+            # fallback: try listing via 'docker' CLI if installed (non-blocking executor)
+            def _list_docker():
+                import subprocess, json as jj
+                try:
+                    out = subprocess.check_output(["docker", "ps", "--format", "{{json .}}"], timeout=5, text=True)
+                    rows=[]
+                    for line in out.strip().splitlines():
+                        if line.strip():
+                            try:
+                                rows.append(jj.loads(line))
+                            except Exception:
+                                pass
+                    return rows
+                except Exception as ex:
+                    return [{"error": str(ex)[:300]}]
+            loop = asyncio.get_running_loop()
+            items = await loop.run_in_executor(None, _list_docker)
+            return {"ok": True, "docker_available": True, "containers": items[:50]}
+        except Exception as e:
+            return {"ok": True, "docker_available": True, "containers": [], "error": str(e)[:300]}
+    else:
+        # no docker socket – fallback: local process list (top 30 by memory)
+        def _top_procs():
+            lst=[]
+            for p in psutil.process_iter(attrs=["pid","name","memory_percent","cpu_percent"]):
+                try:
+                    info=p.info
+                    lst.append(info)
+                except Exception:
+                    continue
+            lst.sort(key=lambda x: x.get("memory_percent",0), reverse=True)
+            return lst[:30]
+        loop = asyncio.get_running_loop()
+        top = await loop.run_in_executor(None, _top_procs)
+        return {"ok": True, "docker_available": False, "fallback": "processes", "top_processes": top}
+

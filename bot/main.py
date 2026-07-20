@@ -1,6 +1,7 @@
-"""Bot entrypoint (aiogram v3, long polling)."""
+"""Bot entrypoint (aiogram v3, long polling) + heartbeat for Bot Health Center."""
 import asyncio
 import logging
+import datetime
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -14,6 +15,24 @@ from middlewares.subscription import SubscriptionMiddleware, MaintenanceMiddlewa
 from handlers import start, generate, edit, premium, balance, style, myworks, checkin, inline, batch, sticker, model
 
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+_heartbeat_task: asyncio.Task | None = None
+
+
+async def _heartbeat_loop():
+    """Update settings bot_last_heartbeat every 60s."""
+    while True:
+        try:
+            iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            await db.set_setting("bot_last_heartbeat", iso)
+            log.info("heartbeat updated: %s", iso)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.warning("heartbeat failed: %s", e)
+        await asyncio.sleep(60)
+
 
 async def _set_commands(bot: Bot):
     await bot.set_my_commands([
@@ -68,13 +87,25 @@ async def main():
     dp.include_router(sticker.router)
     dp.include_router(inline.router)
 
+    # start heartbeat task
+    global _heartbeat_task
+    _heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    logging.info("Bot heartbeat task started (60s)")
+
     logging.info("Bot starting (polling)...")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await _set_commands(bot)
         await dp.start_polling(bot)
     finally:
+        if _heartbeat_task:
+            _heartbeat_task.cancel()
+            try:
+                await _heartbeat_task
+            except asyncio.CancelledError:
+                pass
         await db.close_pool()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
