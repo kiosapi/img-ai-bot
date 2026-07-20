@@ -163,14 +163,10 @@ If you forget step 1-2, admin toggle won't see it. Test list endpoint after addi
 
 - Phase1 Observability DONE commit beeb5f7..007c3b7 — System Monitor + Bot Health + Live Logs
 - Phase2 No-Code Content DONE commit d08a7b2..87e4bd3 — Dynamic Texts 29 keys + Styles CRUD gallery + Command Manager 16 cmds toggle
-- Phase3 Security & Failover NEXT:
-  7 Blocklist / Moderation Manager — list kata dilarang regex prompt NSFW threshold auto-reject log moderation_logs
-  8 Provider Failover Config — drag&drop priority provider + retry count timeout per provider cost per gen + Test Ping button real latency
-  9 Alert Webhook — Discord/Telegram alert if error rate >10% / deposit pending >20 / CPU >90%
-- Phase4 Monetization:
-  10 Cost Tracker — modal per gen per provider profit from deposits/orders chart profit/day model paling boros
-  11 Broadcast Scheduler — jadwal kirim cron repeat weekly preview retry failed
-  12 Backup & Restore 1-Klik — pg_dump download + auto backup harian ke R2
+- Phase3 Security & Failover DONE commit f3e8b14..2459261 — Moderation Blocklist word/regex/category severity block/high/medium/low + Failover Priority drag up/down + Test Ping real latency ms + Alert Webhook Discord/Telegram/Webhook rules error_rate/deposit_pending/cpu/disk/bot_offline + Discord webhook real POST + Telegram bot api send + cooldown
+- Phase4 Monetization DONE commit 098c3d5..97ec08e — Cost Tracker real cost=revenue profit live SQL avg cost/gen provider most expensive/cheapest/highest usage daily chart + Provider breakdown gen*cost + Model breakdown + editable inline cost PUT /api/cost/providers + Broadcast Scheduler once/daily/weekly/monthly pending/sent/failed/cancelled next_run_at countdown real BOT_TOKEN httpx sendMessage/sendPhoto sem20 + Backup 1-Klik pg_dump gzip download/restore double confirm RESTORE safety backup + upload .sql.gz + checksum + auto backup >24h evaluate
+- Fix dropdown transparan DONE commit 6acc7ae..582e6f3 — CustomSelect opaque bg-card z-[100] shadow + Modal z-[90]/[91] + all native select -> CustomSelect grep clean
+- Fix cost/backup responsive DONE — rewritten mobile-first: grid grid-cols-1 sm:grid-cols-2 + flex-col sm:flex-row + w-full max-w-full overflow-hidden + min-w-0/truncate + mobile cards hidden md:block table + overflow-x-auto scrollbar-thin + CustomSelect not native + zero emoji
 
 Report each phase DONE + commit hash + realtime proof.
 
