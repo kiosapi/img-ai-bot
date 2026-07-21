@@ -92,12 +92,27 @@ async def main():
     _heartbeat_task = asyncio.create_task(_heartbeat_loop())
     logging.info("Bot heartbeat task started (60s)")
 
+    # web-app job worker (shared GenQueue with Telegram generate)
+    web_worker = None
+    try:
+        import web_jobs
+        web_worker = web_jobs.start_worker()
+        logging.info("web_jobs worker started")
+    except Exception as e:
+        logging.warning("web_jobs worker failed to start: %s", e)
+
     logging.info("Bot starting (polling)...")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await _set_commands(bot)
         await dp.start_polling(bot)
     finally:
+        if web_worker:
+            try:
+                import web_jobs
+                await web_jobs.stop_worker()
+            except Exception:
+                pass
         if _heartbeat_task:
             _heartbeat_task.cancel()
             try:

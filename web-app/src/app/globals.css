@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.12 0.01 264);
+  --foreground: oklch(0.98 0 0);
+  --card: oklch(0.18 0.015 264);
+  --card-foreground: oklch(0.98 0 0);
+  --primary: oklch(0.62 0.22 264);
+  --primary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.24 0.01 264);
+  --muted-foreground: oklch(0.7 0.02 264);
+  --border: oklch(1 0 0 / 10%);
+  --ring: oklch(0.62 0.22 264);
+  --success: oklch(0.7 0.2 145);
+  --destructive: oklch(0.65 0.2 25);
+  --radius: 0.85rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-destructive: var(--destructive);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 0.2rem);
+  --radius-sm: calc(var(--radius) - 0.4rem);
+}
+
+* {
+  border-color: var(--border);
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+.bg-grid {
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -20%, oklch(0.45 0.18 264 / 0.35), transparent),
+    linear-gradient(to bottom, transparent, var(--background));
+}

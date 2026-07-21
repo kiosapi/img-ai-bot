@@ -23,6 +23,8 @@ from typing import Annotated
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
+from fastapi.middleware.cors import CORSMiddleware
+import user_api
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "/tmp/backups"))
@@ -461,6 +463,11 @@ async def lifespan(app: FastAPI):
         await _ensure_tables()
     except Exception as e:
         print(f"warn ensure tables: {e}")
+    try:
+        user_api.bind_pool(_pool)
+        await user_api.ensure_user_tables(_pool)
+    except Exception as e:
+        print(f"warn user_api tables: {e}")
     # env migrate
     try:
         async with _pool.acquire() as con:
@@ -496,6 +503,19 @@ async def lifespan(app: FastAPI):
         await _pool.close()
 
 app = FastAPI(title="ImageBot Admin API", lifespan=lifespan)
+
+# Public web-app CORS (CF Pages + local). Never use * with credentials.
+_WEB_CORS = [o.strip() for o in os.environ.get("WEB_CORS_ORIGINS", "http://localhost:3001,http://127.0.0.1:3001").split(",") if o.strip()]
+if _WEB_CORS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_WEB_CORS,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+app.include_router(user_api.router)
+
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):

@@ -157,7 +157,13 @@ Semua migration pakai `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` di `_create_sch
 
 ## 🚧 Yang SEDANG/BELUM dikerjakan
 
-Tidak ada task aktif yang menggantung saat AGENTS.md ini di-update terakhir kali.
+### Public web app (imgaai) — Phase 1 IN PROGRESS
+- Spec: `PUBLIC-WEB.md` (LOCKED)
+- Frontend: `web-app/` (Next static export → CF Pages `imgaai.pages.dev`)
+- API user scope: `api/user_api.py` → `/api/user/*` (Telegram Login, me, styles, history, checkin read)
+- Env: `WEB_CORS_ORIGINS`, `USER_COOKIE_SECURE` di `.env.example`
+- **Belum:** generate job shared queue (phase 1.5), topup/promo (v1.1), CF deploy live, BotFather setdomain
+- Admin dashboard tetap `web/` — jangan campur route public
 
 Ide fitur yang PERNAH disarankan tapi belum diminta user (JANGAN kerjakan kecuali diminta eksplisit):
 - Tombol "Regenerate" (buat ulang dengan prompt sama)
