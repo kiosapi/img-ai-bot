@@ -41,7 +41,7 @@ export default function HealthPage() {
   const online = bot?.online;
 
   return (
-    <div className="flex flex-col gap-4 w-full max-w-full overflow-hidden">
+    <div className="flex flex-col gap-4 w-full max-w-full min-w-0">
       <div className="flex flex-wrap items-start justify-between gap-3 w-full">
         <div className="min-w-0"><h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2"><HeartPulse className="h-5 w-5 sm:h-6 sm:w-6" />{lang === "id" ? "Bot Health Center" : "Bot Health Center"}</h1><p className="text-xs sm:text-sm text-muted-foreground mt-1 flex flex-wrap items-center gap-2"><span className="inline-flex items-center gap-1"><span className={`h-2 w-2 rounded-full ${online ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />{online ? (lang === "id" ? "ONLINE REALTIME" : "ONLINE REALTIME") : (lang === "id" ? "OFFLINE" : "OFFLINE")}</span>· heartbeat 60s · {lastUpdate ? lastUpdate.toLocaleTimeString(lang === "id" ? "id-ID" : "en-US") : "-"} · auto 10s</p></div>
         <div className="flex gap-2 shrink-0"><Button variant="outline" size="sm" onClick={load} className="h-8 text-xs"><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />{lang === "id" ? "Refresh" : "Refresh"}</Button><Button variant="outline" size="sm" onClick={() => setRestartOpen(true)} className="h-8 text-xs"><Power className="h-4 w-4" />Restart</Button></div>

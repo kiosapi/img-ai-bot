@@ -9,6 +9,7 @@ import { Input, Switch } from "@/components/ui/controls";
 import { CustomSelect } from "@/components/ui/modal";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 type Provider = { id: string; name: string; base_url: string; is_active: boolean; has_api_key: boolean; api_key_masked: string; base_url_setting: string; };
 type Model = { id: string; external_id: string; provider_id: string; display_name: string; description: string; is_active: boolean; is_default: boolean; sort_order: number; provider_name: string; provider_active: boolean; };

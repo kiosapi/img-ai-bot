@@ -62,7 +62,7 @@ export default function CommandsPage() {
   if (loading && !cmds.length) return <PageLoader label={lang === "id" ? "Memuat..." : "Loading..."} cards={3} rows={4} />;
 
   return (
-    <div className="flex flex-col gap-4 w-full max-w-full overflow-hidden">
+    <div className="flex flex-col gap-4 w-full max-w-full min-w-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0"><h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2"><Command className="h-5 w-5 sm:h-6 sm:w-6" />{lang === "id" ? "Command Manager" : "Command Manager"}</h1><p className="text-xs sm:text-sm text-muted-foreground mt-1">{lang === "id" ? "Aktifkan / matikan command bot tanpa edit code — langsung efek instan." : "Toggle bot commands on/off without code — instant effect."}</p></div>
         <Button variant="outline" size="sm" onClick={load} className="h-8 text-xs shrink-0"><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />Reload</Button>

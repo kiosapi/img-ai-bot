@@ -189,7 +189,7 @@ export default function FailoverPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4 md:gap-6 p-1 w-full max-w-full overflow-hidden">
+    <div className="flex flex-col gap-4 md:gap-6 p-1 w-full max-w-full min-w-0">
       <div className="space-y-1">
         <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2"><Route className="h-5 w-5 md:h-6 md:w-6 shrink-0" />{t("failover.title")}</h1>
         <p className="text-xs md:text-sm text-muted-foreground">{t("failover.sub")}</p>

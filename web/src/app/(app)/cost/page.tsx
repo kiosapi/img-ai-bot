@@ -124,7 +124,7 @@ export default function CostPage() {
   const mostExpId = totals.most_expensive_provider?.id, cheapId = totals.cheapest_provider?.id, topId = totals.highest_usage_provider?.id;
 
   return (
-    <div className="flex flex-col gap-5 w-full max-w-full overflow-hidden">
+    <div className="flex flex-col gap-5 w-full max-w-full min-w-0">
       {/* header — MATCH system page */}
       <div className="flex flex-wrap items-start justify-between gap-3 w-full">
         <div className="min-w-0">

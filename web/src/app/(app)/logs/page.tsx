@@ -63,7 +63,7 @@ export default function LogsPage() {
   const isFallback = data?.source?.includes("fallback") || data?.source?.includes("NOT real");
 
   return (
-    <div className="flex flex-col gap-4 w-full max-w-full overflow-hidden">
+    <div className="flex flex-col gap-4 w-full max-w-full min-w-0">
       <div className="flex flex-wrap items-start justify-between gap-3 w-full">
         <div className="min-w-0"><h1 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2"><ScrollText className="h-5 w-5 sm:h-6 sm:w-6" />{lang === "id" ? "Live Logs" : "Live Logs"}</h1><p className="text-xs sm:text-sm text-muted-foreground mt-1">{isRealtime ? <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />REALTIME via docker.sock</span> : isFallback ? <span className="text-amber-600">FALLBACK — bukan real docker logs</span> : "Docker logs realtime + auto-refresh 5s"}</p></div>
         <div className="flex flex-wrap gap-2 shrink-0">

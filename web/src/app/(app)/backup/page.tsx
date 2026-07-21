@@ -153,7 +153,7 @@ export default function BackupPage() {
     return <PageLoader label={lang === "id" ? "Memuat..." : "Loading..."} cards={3} rows={4} />;
 
   return (
-    <div className="flex flex-col gap-5 w-full max-w-full overflow-hidden">
+    <div className="flex flex-col gap-5 w-full max-w-full min-w-0">
       {/* header MATCH system/failover */}
       <div className="flex flex-wrap items-start justify-between gap-3 w-full">
         <div className="min-w-0">
