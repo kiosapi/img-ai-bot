@@ -237,64 +237,112 @@ async def _unity2_edit(api_key: str, base_url: str, model_id: str, image_bytes: 
         raise ProviderError(f"Gagal edit gambar: {str(e)[:300]}")
 
 
+def _is_hard_provider_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    if any(x in msg for x in ("502", "503", "504", "timeout", "timed out", "bad gateway", "sibuk (502)", "sibuk (503)", "sibuk (504)", "429")):
+        return True
+    return False
+
+
+def _status_from_err(err: Exception) -> int | None:
+    import re
+    m = re.search(r"\((\d{3})\)", str(err))
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
 async def generate_image(model: Dict[str, Any] | None, prompt: str, size: str, user_id: Optional[int] = None, negative: str = "", seed: str | None = None, ref_images_b64: list[bytes] | None = None) -> bytes:
-    # NOTE Phase3 task8 failover: if model is None or generation fails, bot should try providers in failover_priority order
-    # helpers for failover priority ordered fallback
+    # Smart failover: skip providers with recent 502/timeout, prefer higher success rate 1h
+    from provider_health import HEALTH
+
     async def _generate_with_model(m: Dict[str, Any]) -> bytes:
         pid = m["provider_id"]
         rid = _real_model_id(m)
+        if HEALTH.is_skipped(pid):
+            raise ProviderError(ERR_BUSY)
         api_key, base_url = await _resolve_credentials(pid)
         if not api_key:
             raise ProviderError(ERR_NO_KEY)
-        if pid == "cubence":
-            return await _cubence_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
-        elif pid == "rightcodes":
-            return await _rc_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
-        elif pid == "apikeyfun":
-            return await _akf_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
-        elif pid == "unity2":
-            return await _unity2_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
-        else:
-            raise ProviderError(ERR_NO_MODEL)
+        try:
+            if pid == "cubence":
+                out = await _cubence_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
+            elif pid == "rightcodes":
+                out = await _rc_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
+            elif pid == "apikeyfun":
+                out = await _akf_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
+            elif pid == "unity2":
+                out = await _unity2_generate(api_key, base_url, rid, prompt, size, negative=negative, seed=seed, ref_images_b64=ref_images_b64)
+            else:
+                raise ProviderError(ERR_NO_MODEL)
+            HEALTH.record_success(pid)
+            return out
+        except ProviderError as e:
+            HEALTH.record_failure(pid, hard=_is_hard_provider_error(e), status_code=_status_from_err(e))
+            raise
+        except Exception as e:
+            HEALTH.record_failure(pid, hard=_is_hard_provider_error(e), status_code=_status_from_err(e))
+            raise ProviderError(ERR_BUSY) from e
 
     if model is None:
         model = await db.get_default_model()
         if not model:
             try:
-                import config
                 from cubence import generate_image as legacy_gen
                 return await legacy_gen(prompt, size)
             except Exception:
                 raise ProviderError(ERR_NO_MODEL)
-    try:
-        return await _generate_with_model(model)
-    except ProviderError as e:
-        # failover: try other providers in priority order (excluding already tried provider)
-        if "failover enabled" not in str(e).lower():  # placeholder - always attempt failover
-            pass
+
+    tried: set[str] = set()
+    errors: list[str] = []
+
+    # Primary model first if not skipped
+    primary_pid = model.get("provider_id") if model else None
+    if model and primary_pid and not HEALTH.is_skipped(primary_pid):
         try:
-            # list_providers already ordered by failover_priority ASC (Phase3 task8)
-            all_providers = await db.list_providers_failover() if hasattr(db, "list_providers_failover") else await db.list_providers()
-            active_providers = [p for p in all_providers if p.get("is_active") and p["id"] != model["provider_id"]]
-            # order already priority ASC due to list_providers_failover
-            for prov in active_providers:
-                # try any active model from this provider
-                try:
-                    fallback_model = None
-                    # attempt get default or first active for that provider
-                    all_models = await db.list_models(active_only=True)
-                    for mm in all_models:
-                        if mm.get("provider_id") == prov["id"]:
-                            fallback_model = mm
-                            break
-                    if not fallback_model:
-                        continue
-                    return await _generate_with_model(fallback_model)
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        raise
+            return await _generate_with_model(model)
+        except ProviderError as e:
+            tried.add(primary_pid)
+            errors.append(str(e)[:120])
+        except Exception as e:
+            tried.add(primary_pid or "")
+            errors.append(str(e)[:120])
+    elif primary_pid:
+        tried.add(primary_pid)
+
+    # Failover: priority ASC then re-rank by health (skip + success rate)
+    try:
+        all_providers = await db.list_providers_failover() if hasattr(db, "list_providers_failover") else await db.list_providers()
+        active_ids = [p["id"] for p in all_providers if p.get("is_active") and p["id"] not in tried]
+        ordered = HEALTH.sort_provider_ids(active_ids)
+        # keep original priority as secondary sort already in list; sort_provider_ids prioritizes non-skipped + rate
+        all_models = await db.list_models(active_only=True)
+        for pid in ordered:
+            if HEALTH.is_skipped(pid):
+                continue
+            fallback_model = None
+            for mm in all_models:
+                if mm.get("provider_id") == pid:
+                    fallback_model = mm
+                    break
+            if not fallback_model:
+                continue
+            try:
+                return await _generate_with_model(fallback_model)
+            except Exception as e:
+                tried.add(pid)
+                errors.append(str(e)[:80])
+                continue
+    except Exception:
+        pass
+
+    # last resort: raise first/last error generic
+    if errors:
+        raise ProviderError(errors[0] if errors else ERR_BUSY)
+    raise ProviderError(ERR_BUSY)
 
 
 async def edit_image(model: Dict[str, Any] | None, image_bytes: bytes, prompt: str, size: str, user_id: Optional[int] = None) -> bytes:

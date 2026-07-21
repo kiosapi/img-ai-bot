@@ -70,7 +70,7 @@ async def set_size(callback: CallbackQuery):
     if size in ALLOWED_SIZES:
         await db.set_pref_size(callback.from_user.id, size)
         await safe_edit(callback.message, t("size_set", lang, size=size), reply_markup=ui.back_menu(lang))
-    await callback.answer(t("size_saved", lang))
+    await callback.answer(t("saved", lang))
 
 @router.message(Command("batch"))
 async def cmd_batch(message: Message):
@@ -98,7 +98,7 @@ async def set_batch(callback: CallbackQuery):
     if b in ALLOWED_BATCHES:
         await db.set_pref_batch(callback.from_user.id, b)
         await safe_edit(callback.message, t("batch_set", lang, n=b), reply_markup=ui.back_menu(lang))
-    await callback.answer("Saved")
+    await callback.answer(t("saved", lang))
 
 @router.callback_query(F.data=="menu:batch")
 async def menu_batch(callback: CallbackQuery):
@@ -138,17 +138,42 @@ async def cb_adv(callback: CallbackQuery, state: FSMContext):
         await db.set_pref_seed(callback.from_user.id, None)
         await db.set_pref_ref_file_id(callback.from_user.id, None)
         await safe_edit(callback.message, t("adv_cleared", lang), reply_markup=ui.back_menu(lang))
-        await callback.answer("Cleared")
+        await callback.answer(t("cleared", lang))
 
 async def _do_generate(message: Message, prompt: str, variation: bool=False, force_size: str | None=None, enhance: bool=False, batch_override: int | None=None):
     lang = await db.get_lang(message.from_user.id)
+    queue_status_msg = None
     if (await db.get_setting("feat_queue_enabled","1"))=="1":
-        if not await QUEUE.acquire(message.from_user.id):
-            # dynamic busy_msg
+        if QUEUE.is_busy(message.from_user.id):
             busy_dyn = await dyn_texts.get_dynamic_text_or_none("busy_msg")
             msg_busy = busy_dyn if busy_dyn else t("busy_generating", lang)
             await message.answer(msg_busy, reply_markup=ui.back_menu(lang))
             return
+        queue_status_msg = await message.answer(t("queue_joining", lang))
+
+        async def _on_wait(pos: int, eta: int):
+            if not queue_status_msg:
+                return
+            try:
+                if pos <= 0:
+                    txt = t("queue_running", lang, eta=eta)
+                else:
+                    txt = t("queue_pos", lang, pos=pos, eta=eta)
+                await queue_status_msg.edit_text(txt)
+            except Exception:
+                pass
+
+        ok_q = await QUEUE.acquire(message.from_user.id, on_wait=_on_wait)
+        if not ok_q:
+            try:
+                await queue_status_msg.edit_text(t("queue_timeout", lang), reply_markup=ui.back_menu(lang))
+            except Exception:
+                await message.answer(t("queue_timeout", lang), reply_markup=ui.back_menu(lang))
+            return
+        try:
+            await queue_status_msg.edit_text(t("queue_running", lang, eta=QUEUE.eta_sec(message.from_user.id)))
+        except Exception:
+            pass
     if await is_maintenance():
         if (await db.get_setting("feat_queue_enabled","1"))=="1":
             await QUEUE.release(message.from_user.id)
@@ -220,10 +245,12 @@ async def _do_generate(message: Message, prompt: str, variation: bool=False, for
             elif dyn_banned:
                 msg_text = dyn_banned
             else:
-                if lang == "id":
-                    msg_text = f"Blocked moderasi ({severity}). Deteksi: {(matched or '')[:80]}. Coba prompt aman."
-                else:
-                    msg_text = f"Blocked by moderation ({severity}). Detected: {(matched or '')[:80]}. Try safer."
+                msg_text = t(
+                    "moderation_blocked",
+                    lang,
+                    severity=severity or "block",
+                    matched=(matched or "")[:80],
+                )
             try:
                 await mod_checker.log_block(message.from_user.id, final_prompt, rule, matched or "", severity or "block")
             except Exception:
@@ -257,8 +284,16 @@ async def _do_generate(message: Message, prompt: str, variation: bool=False, for
             await QUEUE.release(message.from_user.id)
         return
 
-    status = await message.answer(t("generating", lang, used=used_batch, limit=limit_batch)+"\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
-    animator = ProgressAnimator(message.bot, message.chat.id, status, t("generating", lang, used=used_batch, limit=limit_batch))
+    gen_base = t("generating", lang, used=used_batch, limit=limit_batch)
+    if queue_status_msg is not None:
+        status = queue_status_msg
+        try:
+            await status.edit_text(gen_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+        except Exception:
+            status = await message.answer(gen_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    else:
+        status = await message.answer(gen_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    animator = ProgressAnimator(message.bot, message.chat.id, status, gen_base)
     animator.start()
     produced=0
     try:

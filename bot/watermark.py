@@ -1,9 +1,10 @@
-"""Watermark helpers — premium @imgaai_bot pill."""
+"""Watermark helpers — premium @imgaai_bot frosted glass pill (iOS-style)."""
 from __future__ import annotations
 import io
+from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter  # type: ignore
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance  # type: ignore
     PIL_OK = True
 except ImportError:
     PIL_OK = False
@@ -12,24 +13,19 @@ import db
 import feature_flags as ff
 
 WATERMARK_DEFAULT = "@imgaai_bot"
+_FONT_DIR = Path(__file__).resolve().parent / "fonts"
+
 
 async def should_watermark(user_id: int) -> tuple[bool, str]:
     enabled = await ff.watermark_enabled()
     if not enabled:
         return False, ""
-    # Force @imgaai_bot only — ignore stored text setting if contains "Buat di" etc.
-    # User request: text hanya @imgaai_bot
-    stored = await ff.watermark_text()
+    # Spec: text-only @imgaai_bot — ignore "Buat di" legacy stored text
     text = WATERMARK_DEFAULT
-    # If stored explicitly set to something else but user wants clean, still use @imgaai_bot
-    # Except keep if admin typed different handle intentionally? Enforce @imgaai_bot as per request.
-    if stored and stored.strip() and stored.strip().lower() == "@imgaai_bot":
-        text = stored.strip()
     free_only = await ff.watermark_free_only()
     if free_only:
         try:
-            is_prem = await db.is_premium(user_id)
-            if is_prem:
+            if await db.is_premium(user_id):
                 return False, ""
         except Exception:
             pass
@@ -37,34 +33,41 @@ async def should_watermark(user_id: int) -> tuple[bool, str]:
 
 
 def _load_premium_font(size: int):
-    """Premium rare font stack — try modern geometric grotesk + clean fallback.
-
-    Preferred (in order):
-    - Space Grotesk Bold (geometric, premium, widely used by modern brands)
-    - Manrope ExtraBold (rare, premium, used by Linear/Stripe style)
-    - Satoshi Bold / General Sans (modern)
-    - Inter Tight Bold
-    Falls back to bundled DejaVu if none available, still renders clean.
-    """
-    candidates = [
+    """Load bundled premium fonts first (Space Grotesk / Manrope / Inter), then system."""
+    names = [
         "SpaceGrotesk-Bold.ttf",
         "SpaceGrotesk-SemiBold.ttf",
-        "Manrope-Bold.ttf",
         "Manrope-ExtraBold.ttf",
+        "Manrope-Bold.ttf",
         "Satoshi-Bold.ttf",
-        "GeneralSans-Bold.ttf",
-        "Geist-Bold.ttf",
-        "InterTight-Bold.ttf",
         "Inter-Bold.ttf",
+        "InterTight-Bold.ttf",
         "DejaVuSans-Bold.ttf",
         "NotoSans-Bold.ttf",
-        "DejaVuSans.ttf",
         "Arial_Bold.ttf",
         "Arial.ttf",
     ]
-    for name in candidates:
+    # 1) bundled fonts/ next to this module
+    for name in names:
+        p = _FONT_DIR / name
+        if p.is_file():
+            try:
+                return ImageFont.truetype(str(p), size)
+            except Exception:
+                continue
+    # 2) bare filename (system / cwd)
+    for name in names:
         try:
             return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    # 3) common linux paths in slim images
+    for path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
+        try:
+            return ImageFont.truetype(path, size)
         except Exception:
             continue
     try:
@@ -74,160 +77,153 @@ def _load_premium_font(size: int):
 
 
 def apply_watermark_image(image_bytes: bytes, watermark_text: str) -> bytes:
-    """Modern premium watermark — text only @imgaai_bot.
+    """iOS-style frosted glass pill — text only @imgaai_bot.
 
-    Design:
-    - Bottom-right modern glass pill, no icon/emoji
-    - Font: Space Grotesk / Manrope-style geometric bold (premium rare)
-    - Background: frosted blur + radial gradient dark pill with soft white stroke
-    - Text pure: @imgaai_bot — mono-ish tight tracking
-    - Letter-spacing slightly tightened for premium feel via manual char gap
-    - Responsive: base = max(w,h), font base/33
-    - Safe fallback returns original on error
+    - Premium font from bot/fonts (Space Grotesk Bold preferred)
+    - Real Gaussian blur of image region under pill
+    - Translucent dark glass fill + top specular highlight + soft white stroke
+    - Bottom-right, responsive scale, no emoji/icon
     """
     if not PIL_OK or not watermark_text:
         return image_bytes
-    text = watermark_text.strip()
-    if not text:
-        return image_bytes
-    # Enforce requested @imgaai_bot — no "Buat di", no icon
-    # If admin saved different, override to clean for image overlay (caption still may differ if needed)
-    if "imgaai_bot" not in text.lower():
-        text = WATERMARK_DEFAULT
-    else:
-        # Normalize casing — user wants exactly @imgaai_bot
-        text = WATERMARK_DEFAULT
+    text = WATERMARK_DEFAULT  # hard lock per product spec
 
     try:
         im = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         w, h = im.size
         base = max(w, h)
 
-        # Responsive sizing
-        font_size = max(18, int(base / 33))
-        pad_x = max(16, int(base / 52))
-        pad_y = max(9, int(base / 92))
-        radius = max(12, int(font_size * 0.95))
-        margin = max(16, int(base / 48))
-        # letter spacing premium tight
-        letter_gap = max(0, int(font_size * 0.02))
+        font_size = max(20, int(base / 36))
+        pad_x = max(18, int(base / 48))
+        pad_y = max(10, int(base / 88))
+        radius = max(14, int(font_size * 1.05))
+        margin = max(18, int(base / 42))
 
         font = _load_premium_font(font_size)
 
-        tmp = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
-        tmp_draw = ImageDraw.Draw(tmp)
-
-        # Measure with optional tracking
-        def text_width(s: str) -> int:
-            try:
-                bb = tmp_draw.textbbox((0, 0), s, font=font)
-                return bb[2] - bb[0] + (len(s) - 1) * letter_gap
-            except Exception:
-                return int(len(s) * font_size * 0.60 + (len(s)-1)*letter_gap)
-
-        tw = text_width(text)
-        # height measurement
+        # Measure
+        probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
         try:
-            tb = tmp_draw.textbbox((0, 0), text, font=font)
-            th = tb[3] - tb[1]
+            bb = probe.textbbox((0, 0), text, font=font)
+            tw, th = bb[2] - bb[0], bb[3] - bb[1]
         except Exception:
-            th = font_size
+            tw, th = int(len(text) * font_size * 0.58), font_size
 
         pill_w = tw + pad_x * 2
-        pill_h = th + pad_y * 2 + 2
-        # Cap max 58% width
-        max_w = int(w * 0.58)
+        pill_h = th + pad_y * 2 + 4
+        max_w = int(w * 0.55)
         if pill_w > max_w:
-            # reduce font
-            font_size = max(14, int(font_size * max_w / pill_w))
+            scale = max_w / pill_w
+            font_size = max(16, int(font_size * scale))
             font = _load_premium_font(font_size)
-            tw = text_width(text)
+            pad_x = max(14, int(pad_x * scale))
+            pad_y = max(8, int(pad_y * scale))
+            radius = max(12, int(font_size * 1.05))
             try:
-                tb = tmp_draw.textbbox((0, 0), text, font=font)
-                th = tb[3] - tb[1]
+                bb = probe.textbbox((0, 0), text, font=font)
+                tw, th = bb[2] - bb[0], bb[3] - bb[1]
             except Exception:
-                th = font_size
+                tw, th = int(len(text) * font_size * 0.58), font_size
             pill_w = tw + pad_x * 2
-            pill_h = th + pad_y * 2 + 2
+            pill_h = th + pad_y * 2 + 4
 
-        x1 = w - pill_w - margin
-        y1 = h - pill_h - margin
-        x2 = w - margin
-        y2 = h - margin
+        x1 = max(margin, w - pill_w - margin)
+        y1 = max(margin, h - pill_h - margin)
+        x2 = min(w - margin, x1 + pill_w)
+        y2 = min(h - margin, y1 + pill_h)
+        # re-sync size from clamped box
+        pill_w = x2 - x1
+        pill_h = y2 - y1
 
-        # Clamp
-        x1 = max(margin, x1)
-        y1 = max(margin, y1)
-
-        # Frosted blur under pill
+        # --- Frosted glass: strong blur of region under pill ---
+        expand = max(8, int(base / 120))
+        cx1 = max(0, x1 - expand)
+        cy1 = max(0, y1 - expand)
+        cx2 = min(w, x2 + expand)
+        cy2 = min(h, y2 + expand)
         try:
-            box = (int(x1), int(y1), int(x2), int(y2))
-            crop = im.crop(box)
-            blur_r = max(3, int(base / 260))
-            blurred = crop.filter(ImageFilter.GaussianBlur(radius=blur_r))
-            im.paste(blurred, box)
+            crop = im.crop((cx1, cy1, cx2, cy2))
+            blur_r = max(8, int(base / 90))  # stronger = more iOS glass
+            frosted = crop.filter(ImageFilter.GaussianBlur(radius=blur_r))
+            # slightly brighten frosted area (iOS sheen)
+            frosted = ImageEnhance.Brightness(frosted).enhance(1.08)
+            frosted = ImageEnhance.Contrast(frosted).enhance(0.92)
+            im.paste(frosted, (cx1, cy1))
         except Exception:
             pass
 
+        # Masked pill composite
         overlay = Image.new("RGBA", im.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-
-        # Pill background: modern deep charcoal 88% opacity + subtle gradient via two rects
-        # Layer 1: base
-        base_col = (18, 18, 19, 196)
+        mask = Image.new("L", im.size, 0)
+        mask_draw = ImageDraw.Draw(mask)
         try:
-            draw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=base_col)
-        except AttributeError:
-            draw.rectangle([x1 + radius, y1, x2 - radius, y2], fill=base_col)
-            draw.rectangle([x1, y1 + radius, x2, y2 - radius], fill=base_col)
-            draw.ellipse([x1, y1, x1 + radius*2, y1 + radius*2], fill=base_col)
-            draw.ellipse([x2 - radius*2, y1, x2, y1 + radius*2], fill=base_col)
-            draw.ellipse([x1, y2 - radius*2, x1 + radius*2, y2], fill=base_col)
-            draw.ellipse([x2 - radius*2, y2 - radius*2, x2, y2], fill=base_col)
+            mask_draw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=255)
+        except Exception:
+            mask_draw.rectangle([x1, y1, x2, y2], fill=255)
 
-        # Layer 2: subtle top highlight inner (premium glass)
-        hi_h = max(2, pill_h // 3)
-        hi_col = (255, 255, 255, 22)
+        # Glass body: deep charcoal translucent (iOS Control Center vibe)
+        glass = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        gdraw = ImageDraw.Draw(glass)
         try:
-            # inner highlight rounded top only effect
-            draw.rounded_rectangle([x1+1, y1+1, x2-1, y1+hi_h], radius=radius//1.2, fill=hi_col)
+            gdraw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=(22, 22, 24, 150))
+        except Exception:
+            gdraw.rectangle([x1, y1, x2, y2], fill=(22, 22, 24, 150))
+
+        # Soft white veil for frosted feel
+        veil = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        vdraw = ImageDraw.Draw(veil)
+        try:
+            vdraw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=(255, 255, 255, 28))
+        except Exception:
+            vdraw.rectangle([x1, y1, x2, y2], fill=(255, 255, 255, 28))
+
+        # Top specular highlight (glass reflection)
+        hi_h = max(3, pill_h // 2)
+        hi = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        hdraw = ImageDraw.Draw(hi)
+        try:
+            hdraw.rounded_rectangle(
+                [x1 + 1, y1 + 1, x2 - 1, y1 + hi_h],
+                radius=max(6, radius - 2),
+                fill=(255, 255, 255, 38),
+            )
         except Exception:
             pass
 
-        # Stroke: soft white 9%
+        # Stroke
+        stroke = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        sdraw = ImageDraw.Draw(stroke)
         try:
-            draw.rounded_rectangle([x1+0.5, y1+0.5, x2-0.5, y2-0.5], radius=radius, outline=(255,255,255,28), width=1)
+            sdraw.rounded_rectangle(
+                [x1 + 0.5, y1 + 0.5, x2 - 0.5, y2 - 0.5],
+                radius=radius,
+                outline=(255, 255, 255, 55),
+                width=1,
+            )
         except Exception:
             pass
 
-        # Text: centered vertically, slight shadow for depth
-        text_x = x1 + pad_x
-        # Build string with tracking manually if gap >0
-        if letter_gap > 0:
-            # draw char by char
-            cur_x = text_x
-            # shadow first pass
-            for ch in text:
-                try:
-                    draw.text((cur_x+1, y1 + pad_y + 2), ch, font=font, fill=(0,0,0,110))
-                except Exception:
-                    pass
-                cur_x += tmp_draw.textlength(ch, font=font) + letter_gap if hasattr(tmp_draw, 'textlength') else font_size*0.6 + letter_gap
-            cur_x = text_x
-            for ch in text:
-                draw.text((cur_x, y1 + pad_y + 1), ch, font=font, fill=(255,255,255,240))
-                try:
-                    cw = tmp_draw.textlength(ch, font=font)
-                except Exception:
-                    cw = font_size * 0.60
-                cur_x += cw + letter_gap
-        else:
-            draw.text((text_x+1, y1 + pad_y + 2), text, font=font, fill=(0,0,0,110))
-            draw.text((text_x, y1 + pad_y + 1), text, font=font, fill=(255,255,255,240))
+        # Apply layers
+        for layer in (glass, veil, hi, stroke):
+            overlay = Image.alpha_composite(overlay, layer)
+
+        # Text with soft shadow
+        tdraw = ImageDraw.Draw(overlay)
+        # vertical center text
+        try:
+            bb = tdraw.textbbox((0, 0), text, font=font)
+            th = bb[3] - bb[1]
+            ty_off = bb[1]
+        except Exception:
+            th, ty_off = font_size, 0
+        text_x = x1 + (pill_w - tw) // 2
+        text_y = y1 + (pill_h - th) // 2 - ty_off
+        tdraw.text((text_x + 1, text_y + 1), text, font=font, fill=(0, 0, 0, 90))
+        tdraw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 245))
 
         combined = Image.alpha_composite(im, overlay)
         out = io.BytesIO()
-        combined.convert("RGB").save(out, format="PNG")
+        combined.convert("RGB").save(out, format="PNG", optimize=True)
         return out.getvalue()
     except Exception:
         return image_bytes

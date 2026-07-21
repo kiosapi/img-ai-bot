@@ -56,7 +56,9 @@ async def handle_inline(inline: InlineQuery):
                 caption=f"🖼️ {prompt}\nvia @{(await inline.bot.get_me()).username}",
             ))
         if not results:
-            await inline.answer([], switch_pm_text="🎨 Buat gambar pertama kamu", switch_pm_parameter="inline_empty")
+            lang = await db.get_lang(user_id)
+            from i18n import t
+            await inline.answer([], switch_pm_text=t("inline_empty", lang)[:64], switch_pm_parameter="inline_empty")
             return
         await inline.answer(results, cache_time=5, is_personal=True)
         return

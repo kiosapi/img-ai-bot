@@ -1161,7 +1161,7 @@ async def feat_checkin_enabled() -> bool:
 
 
 async def get_watermark_text() -> str:
-    return await get_setting("watermark_text", "Buat di @imgaai_bot") or "Buat di @imgaai_bot"
+    return await get_setting("watermark_text", "@imgaai_bot") or "@imgaai_bot"
 
 
 async def get_watermark_free_only() -> bool:

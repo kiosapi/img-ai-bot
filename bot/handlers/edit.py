@@ -34,9 +34,27 @@ async def _check_and_consume(uid: int):
 async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str | None = None):
     lang = await db.get_lang(message.from_user.id)
     acquired=False
+    queue_status_msg = None
     if (await db.get_setting("feat_queue_enabled", "1")) == "1":
-        if not await QUEUE.acquire(message.from_user.id):
+        if QUEUE.is_busy(message.from_user.id):
             await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
+            return
+        queue_status_msg = await message.answer(t("queue_joining", lang))
+
+        async def _on_wait(pos: int, eta: int):
+            if not queue_status_msg:
+                return
+            try:
+                txt = t("queue_running", lang, eta=eta) if pos <= 0 else t("queue_pos", lang, pos=pos, eta=eta)
+                await queue_status_msg.edit_text(txt)
+            except Exception:
+                pass
+
+        if not await QUEUE.acquire(message.from_user.id, on_wait=_on_wait):
+            try:
+                await queue_status_msg.edit_text(t("queue_timeout", lang), reply_markup=ui.back_menu(lang))
+            except Exception:
+                await message.answer(t("queue_timeout", lang), reply_markup=ui.back_menu(lang))
             return
         acquired=True
     if await is_maintenance():
@@ -68,10 +86,12 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
             elif dyn_banned:
                 msg_text = dyn_banned
             else:
-                if lang == "id":
-                    msg_text = f"🚫 <b>Prompt diblokir</b> oleh moderasi ({severity}).\nKata terdeteksi: <code>{(matched or '')[:80]}</code>\nCoba prompt lain."
-                else:
-                    msg_text = f"🚫 <b>Prompt blocked</b> by moderation ({severity}).\nDetected: <code>{(matched or '')[:80]}</code>\nTry safer prompt."
+                msg_text = t(
+                    "moderation_blocked",
+                    lang,
+                    severity=severity or "block",
+                    matched=(matched or "")[:80],
+                )
             try:
                 await mod_checker.log_block(message.from_user.id, prompt, rule, matched or "", severity or "block")
             except Exception:
@@ -99,8 +119,16 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
     except Exception:
         active_model = None
 
-    status = await message.answer(t("editing", lang, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
-    animator = ProgressAnimator(message.bot, message.chat.id, status, t("editing", lang, used=used, limit=limit))
+    edit_base = t("editing", lang, used=used, limit=limit)
+    if queue_status_msg is not None:
+        status = queue_status_msg
+        try:
+            await status.edit_text(edit_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+        except Exception:
+            status = await message.answer(edit_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    else:
+        status = await message.answer(edit_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    animator = ProgressAnimator(message.bot, message.chat.id, status, edit_base)
     animator.start()
     try:
         buf = io.BytesIO()
@@ -216,7 +244,8 @@ async def cb_regen(callback: CallbackQuery):
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt") or gen.get("user_id")!=callback.from_user.id:
         await callback.answer(t("invalid_data", lang), show_alert=True); return
-    await callback.answer(t("generating", lang, used=0, limit=0)[:30])
+    await callback.answer(t("result_regen", lang)[:40])
+    # same prompt; seed from original if any
     await _do_generate_from_edit(callback.message, gen["prompt"])
 
 @router.callback_query(F.data.startswith("var:"))
@@ -228,7 +257,7 @@ async def cb_variation(callback: CallbackQuery):
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt") or gen.get("user_id")!=callback.from_user.id:
         await callback.answer(t("invalid_data", lang), show_alert=True); return
-    await callback.answer("Variation")
+    await callback.answer(t("result_var", lang)[:40])
     await _do_generate_from_edit(callback.message, gen["prompt"], variation=True)
 
 @router.callback_query(F.data.startswith("hd:"))
@@ -240,7 +269,7 @@ async def cb_hd(callback: CallbackQuery):
     gen = await db.get_generation_by_id(gen_id)
     if not gen or not gen.get("prompt") or gen.get("user_id")!=callback.from_user.id:
         await callback.answer(t("invalid_data", lang), show_alert=True); return
-    await callback.answer("HD")
+    await callback.answer(t("result_hd", lang)[:40])
     await _do_generate_from_edit(callback.message, gen["prompt"], force_size="1536x1024")
 
 @router.callback_query(F.data.startswith("editthis:"))

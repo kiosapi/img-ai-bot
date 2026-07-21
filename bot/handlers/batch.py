@@ -49,9 +49,27 @@ async def cmd_batch(message: Message):
 async def _do_batch(message: Message, prompt: str, count: int):
     lang = await db.get_lang(message.from_user.id)
     acquired=False
+    queue_status_msg = None
     if (await db.get_setting("feat_queue_enabled", "1")) == "1":
-        if not await QUEUE.acquire(message.from_user.id):
+        if QUEUE.is_busy(message.from_user.id):
             await message.answer(t("busy_generating", lang), reply_markup=ui.back_menu(lang))
+            return
+        queue_status_msg = await message.answer(t("queue_joining", lang))
+
+        async def _on_wait(pos: int, eta: int):
+            if not queue_status_msg:
+                return
+            try:
+                txt = t("queue_running", lang, eta=eta) if pos <= 0 else t("queue_pos", lang, pos=pos, eta=eta)
+                await queue_status_msg.edit_text(txt)
+            except Exception:
+                pass
+
+        if not await QUEUE.acquire(message.from_user.id, on_wait=_on_wait):
+            try:
+                await queue_status_msg.edit_text(t("queue_timeout", lang), reply_markup=ui.back_menu(lang))
+            except Exception:
+                await message.answer(t("queue_timeout", lang), reply_markup=ui.back_menu(lang))
             return
         acquired=True
     from config import DEFAULT_DAILY_LIMIT
@@ -67,8 +85,16 @@ async def _do_batch(message: Message, prompt: str, count: int):
     style_id_raw = await _style_of(message.from_user.id)
     base_prompt = style_presets.apply_style(prompt, style_id_raw)
 
-    status = await message.answer(t("batch_generating", lang, n=count, used=used, limit=limit) + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
-    animator = ProgressAnimator(message.bot, message.chat.id, status, t("batch_generating", lang, n=count, used=used, limit=limit))
+    batch_base = t("batch_generating", lang, n=count, used=used, limit=limit)
+    if queue_status_msg is not None:
+        status = queue_status_msg
+        try:
+            await status.edit_text(batch_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+        except Exception:
+            status = await message.answer(batch_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    else:
+        status = await message.answer(batch_base + "\n▱▱▱▱▱▱▱▱▱▱  ⏱️ 0s")
+    animator = ProgressAnimator(message.bot, message.chat.id, status, batch_base)
     animator.start()
 
     try:
