@@ -579,12 +579,12 @@ async def create_generate(body: GenerateBody, user_id: Annotated[int, Depends(re
             "SELECT count(*) FROM web_gen_jobs WHERE status IN ('queued','running')"
         ) or 1
     return {
-        "ok": True,
-        "job_id": job_id,
-        "status": "queued",
-        "position": max(1, int(waiting)),
-                "eta_sec": max(30, int(waiting) * 160),
-            }
+            "ok": True,
+            "job_id": job_id,
+            "status": "queued",
+            "position": max(1, int(waiting)),
+            "eta_sec": max(30, int(waiting) * 160),
+        }
 
 
 # Typical end-to-end gen (provider + watermark) — used for ETA, not fake 45s.
