@@ -12,6 +12,8 @@ import {
 import { api, getToken } from "@/lib/utils";
 
 const STORAGE_KEY = "imgaai_active_gen_job";
+// images stay in memory only — localStorage quota dies on 2–3MB data URLs
+const IMAGE_MEM = new Map<string, string>();
 
 export type GenJobSnapshot = {
   jobId: string;
@@ -55,30 +57,29 @@ function calcProgress(
   createdAt: number,
   position: number
 ): number {
-  if (status === "done") return 100;
-  if (status === "failed") return 100;
+  if (status === "done" || status === "failed") return 100;
   const now = Date.now();
   if (status === "queued") {
-    // queue: 2–18% based on position
     const pos = Math.max(1, position || 1);
-    return clamp(4 + Math.min(14, 20 / pos) + ((now - createdAt) / 1000) * 0.15, 2, 22);
+    return clamp(3 + Math.min(12, 18 / pos) + ((now - createdAt) / 1000) * 0.05, 2, 18);
   }
-  // running: time-based toward 92%
   const start = startedAt || createdAt;
-  const eta = Math.max(20, etaSec || 45);
+  const eta = Math.max(60, etaSec || 150);
   const elapsed = (now - start) / 1000;
-  const raw = 22 + (elapsed / eta) * 70;
-  return clamp(raw, 22, 92);
+  // asymptotic toward 94% so long jobs never look "stuck at 100% while Processing"
+  const raw = 18 + (1 - Math.exp(-elapsed / Math.max(40, eta * 0.55))) * 76;
+  return clamp(raw, 18, 94);
 }
+
+type StoredMeta = Omit<GenJobSnapshot, "imageDataUrl">;
 
 function loadStored(): GenJobSnapshot | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const j = JSON.parse(raw) as GenJobSnapshot;
+    const j = JSON.parse(raw) as StoredMeta;
     if (!j?.jobId) return null;
-    // drop ancient done/failed
     if (
       (j.status === "done" || j.status === "failed") &&
       Date.now() - (j.createdAt || 0) > 1000 * 60 * 30
@@ -86,7 +87,10 @@ function loadStored(): GenJobSnapshot | null {
       localStorage.removeItem(STORAGE_KEY);
       return null;
     }
-    return j;
+    return {
+      ...j,
+      imageDataUrl: IMAGE_MEM.get(j.jobId) || null,
+    };
   } catch {
     return null;
   }
@@ -94,8 +98,25 @@ function loadStored(): GenJobSnapshot | null {
 
 function saveStored(job: GenJobSnapshot | null) {
   if (typeof window === "undefined") return;
-  if (!job) localStorage.removeItem(STORAGE_KEY);
-  else localStorage.setItem(STORAGE_KEY, JSON.stringify(job));
+  if (!job) {
+    localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+  if (job.imageDataUrl) IMAGE_MEM.set(job.jobId, job.imageDataUrl);
+  // never persist imageDataUrl — quota / stringify hang
+  const { imageDataUrl: _drop, ...meta } = job;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(meta));
+  } catch {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ ...meta, imageDataUrl: undefined, prompt: (meta.prompt || "").slice(0, 120) })
+      );
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function GenJobProvider({ children }: { children: React.ReactNode }) {
@@ -103,6 +124,7 @@ export function GenJobProvider({ children }: { children: React.ReactNode }) {
   const pollRef = useRef<number | null>(null);
   const tickRef = useRef<number | null>(null);
   const hydrated = useRef(false);
+  const fetchingImg = useRef<string | null>(null);
 
   const stopPoll = useCallback(() => {
     if (pollRef.current) {
@@ -111,63 +133,124 @@ export function GenJobProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const applyPoll = useCallback(async (jobId: string) => {
-    if (!getToken()) return;
-    try {
-      const j = await api<{
-        job_id: string;
-        status: string;
-        position?: number;
-        eta_sec?: number;
-        error?: string | null;
-        image_data_url?: string;
-        has_image?: boolean;
-        prompt?: string;
-      }>(`/api/user/generate/${jobId}`);
-
+  const fetchImage = useCallback(async (jobId: string) => {
+    if (fetchingImg.current === jobId) return;
+    if (IMAGE_MEM.has(jobId)) {
       setJob((prev) => {
         if (!prev || prev.jobId !== jobId) return prev;
-        const status = j.status;
-        const position = j.position ?? prev.position;
-        const etaSec = j.eta_sec ?? prev.etaSec;
-        const startedAt =
-          status === "running" && !prev.startedAt ? Date.now() : prev.startedAt;
-        const next: GenJobSnapshot = {
-          ...prev,
-          status,
-          position,
-          etaSec,
-          error: j.error || null,
-          prompt: j.prompt || prev.prompt,
-          startedAt,
-          imageDataUrl: j.image_data_url || prev.imageDataUrl,
-          progress: calcProgress(status, etaSec, startedAt, prev.createdAt, position),
-        };
-        if (status === "done" && j.image_data_url) {
-          next.progress = 100;
-          // clear b64 on server after client has it
-          api(`/api/user/generate/${jobId}/image`, { method: "DELETE" }).catch(() => {});
-        }
-        if (status === "failed") next.progress = 100;
+        if (prev.imageDataUrl) return prev;
+        const next = { ...prev, imageDataUrl: IMAGE_MEM.get(jobId) || null, progress: 100 };
         saveStored(next);
         return next;
       });
+      return;
+    }
+    fetchingImg.current = jobId;
+    try {
+      const img = await api<{ image_data_url?: string; has_image?: boolean }>(
+        `/api/user/generate/${jobId}/image`
+      );
+      const url = img.image_data_url || null;
+      if (url) IMAGE_MEM.set(jobId, url);
+      setJob((prev) => {
+        if (!prev || prev.jobId !== jobId) return prev;
+        const next: GenJobSnapshot = {
+          ...prev,
+          status: "done",
+          progress: 100,
+          imageDataUrl: url || prev.imageDataUrl,
+        };
+        saveStored(next);
+        return next;
+      });
+      // free DB after client has bytes
+      api(`/api/user/generate/${jobId}/image`, { method: "DELETE" }).catch(() => {});
     } catch {
-      /* keep previous */
+      // status may still be done without image — surface done anyway
+      setJob((prev) => {
+        if (!prev || prev.jobId !== jobId) return prev;
+        if (prev.status === "done") return prev;
+        const next = { ...prev, status: "done", progress: 100 };
+        saveStored(next);
+        return next;
+      });
+    } finally {
+      if (fetchingImg.current === jobId) fetchingImg.current = null;
     }
   }, []);
+
+  const applyPoll = useCallback(
+    async (jobId: string) => {
+      if (!getToken()) return;
+      try {
+        const j = await api<{
+          job_id: string;
+          status: string;
+          position?: number;
+          eta_sec?: number;
+          error?: string | null;
+          has_image?: boolean;
+          prompt?: string;
+          started_at?: string | null;
+        }>(`/api/user/generate/${jobId}`);
+
+        let shouldFetchImg = false;
+        setJob((prev) => {
+          if (!prev || prev.jobId !== jobId) return prev;
+          const status = j.status;
+          const position = j.position ?? prev.position;
+          const etaSec = j.eta_sec ?? prev.etaSec;
+          let startedAt = prev.startedAt;
+          if (status === "running" && !startedAt) {
+            if (j.started_at) {
+              const t = Date.parse(j.started_at);
+              startedAt = Number.isFinite(t) ? t : Date.now();
+            } else {
+              startedAt = Date.now();
+            }
+          }
+          const next: GenJobSnapshot = {
+            ...prev,
+            status,
+            position,
+            etaSec,
+            error: j.error || null,
+            prompt: j.prompt || prev.prompt,
+            startedAt,
+            progress: calcProgress(status, etaSec, startedAt, prev.createdAt, position),
+            imageDataUrl: prev.imageDataUrl || IMAGE_MEM.get(jobId) || null,
+          };
+          if (status === "done") {
+            next.progress = 100;
+            if (!next.imageDataUrl && j.has_image) shouldFetchImg = true;
+          }
+          if (status === "failed") next.progress = 100;
+          saveStored(next);
+          return next;
+        });
+        if (shouldFetchImg || (j.status === "done" && j.has_image && !IMAGE_MEM.has(jobId))) {
+          void fetchImage(jobId);
+        }
+      } catch {
+        /* keep previous — do not swallow forever: next tick retries */
+      }
+    },
+    [fetchImage]
+  );
 
   const ensurePolling = useCallback(
     (jobId: string, status: string) => {
       stopPoll();
-      if (status === "done" || status === "failed") return;
-      pollRef.current = window.setInterval(() => applyPoll(jobId), 2000);
+      if (status === "done" || status === "failed") {
+        if (status === "done") void fetchImage(jobId);
+        return;
+      }
+      pollRef.current = window.setInterval(() => applyPoll(jobId), 1500);
       applyPoll(jobId);
     },
-    [applyPoll, stopPoll]
+    [applyPoll, fetchImage, stopPoll]
   );
 
-  // hydrate + smooth progress tick
   useEffect(() => {
     if (hydrated.current) return;
     hydrated.current = true;
@@ -176,9 +259,11 @@ export function GenJobProvider({ children }: { children: React.ReactNode }) {
       setJob(stored);
       if (stored.status === "queued" || stored.status === "running") {
         ensurePolling(stored.jobId, stored.status);
+      } else if (stored.status === "done" && !stored.imageDataUrl) {
+        void fetchImage(stored.jobId);
       }
     }
-  }, [ensurePolling]);
+  }, [ensurePolling, fetchImage]);
 
   useEffect(() => {
     if (tickRef.current) window.clearInterval(tickRef.current);
@@ -198,13 +283,12 @@ export function GenJobProvider({ children }: { children: React.ReactNode }) {
         saveStored(next);
         return next;
       });
-    }, 500);
+    }, 400);
     return () => {
       if (tickRef.current) window.clearInterval(tickRef.current);
     };
   }, []);
 
-  // stop poll when terminal
   useEffect(() => {
     if (!job) return;
     if (job.status === "done" || job.status === "failed") stopPoll();
@@ -230,8 +314,8 @@ export function GenJobProvider({ children }: { children: React.ReactNode }) {
         jobId: res.job_id,
         status: res.status,
         position: res.position || 1,
-        etaSec: res.eta_sec || 45,
-        progress: 5,
+        etaSec: res.eta_sec || 150,
+        progress: 4,
         error: null,
         imageDataUrl: null,
         prompt: args.prompt.trim(),
@@ -255,6 +339,7 @@ export function GenJobProvider({ children }: { children: React.ReactNode }) {
         saveStored(next);
         return next;
       }
+      IMAGE_MEM.delete(prev.jobId);
       saveStored(null);
       return null;
     });
@@ -262,7 +347,10 @@ export function GenJobProvider({ children }: { children: React.ReactNode }) {
 
   const clearResult = useCallback(() => {
     stopPoll();
-    setJob(null);
+    setJob((prev) => {
+      if (prev) IMAGE_MEM.delete(prev.jobId);
+      return null;
+    });
     saveStored(null);
   }, [stopPoll]);
 
@@ -280,17 +368,6 @@ export function useGenJob() {
   const ctx = useContext(GenJobCtx);
   if (!ctx) throw new Error("useGenJob outside provider");
   return ctx;
-}
-
-/** Optional: mark success toast already shown */
-export function useMarkJobNotified() {
-  const { job } = useGenJob();
-  const setNotified = useCallback(() => {
-    if (!job) return;
-    const next = { ...job, notified: true };
-    saveStored(next);
-  }, [job]);
-  return setNotified;
 }
 
 export function patchJobNotified() {

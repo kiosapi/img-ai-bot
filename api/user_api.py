@@ -583,19 +583,26 @@ async def create_generate(body: GenerateBody, user_id: Annotated[int, Depends(re
         "job_id": job_id,
         "status": "queued",
         "position": max(1, int(waiting)),
-        "eta_sec": max(15, int(waiting) * 40),
-    }
+                "eta_sec": max(30, int(waiting) * 160),
+            }
+
+
+# Typical end-to-end gen (provider + watermark) — used for ETA, not fake 45s.
+_TYPICAL_GEN_SEC = 150
+_TYPICAL_QUEUE_SLOT_SEC = 160
 
 
 @router.get("/generate/{job_id}")
 async def get_generate(job_id: str, user_id: Annotated[int, Depends(require_user)]):
+    """Lightweight poll — never embed base64 (breaks browser + tunnel)."""
     if len(job_id) > 64 or not re.match(r"^[A-Za-z0-9_-]+$", job_id):
         raise HTTPException(status_code=400, detail="invalid job_id")
     async with _pool.acquire() as con:
         row = await con.fetchrow(
             """
-            SELECT id, user_id, status, position, eta_sec, error, result_b64, gen_id,
-                   prompt, size, created_at, started_at, finished_at
+            SELECT id, user_id, status, position, eta_sec, error, gen_id,
+                   prompt, size, created_at, started_at, finished_at,
+                   (result_b64 IS NOT NULL AND length(result_b64) > 0) AS has_image
             FROM web_gen_jobs WHERE id=$1
             """,
             job_id,
@@ -603,9 +610,8 @@ async def get_generate(job_id: str, user_id: Annotated[int, Depends(require_user
         if not row or int(row["user_id"]) != user_id:
             raise HTTPException(status_code=404, detail="not found")
 
-        # live queue position + ETA
-        position = row["position"] or 0
-        eta_sec = row["eta_sec"] or 0
+        position = int(row["position"] or 0)
+        eta_sec = int(row["eta_sec"] or 0)
         status = row["status"]
         if status == "queued":
             ahead = await con.fetchval(
@@ -617,8 +623,7 @@ async def get_generate(job_id: str, user_id: Annotated[int, Depends(require_user
                 row["created_at"],
             )
             position = int(ahead or 0) + 1
-            # avg 40s per slot in front + self
-            eta_sec = max(15, position * 40)
+            eta_sec = max(30, position * _TYPICAL_QUEUE_SLOT_SEC)
             await con.execute(
                 "UPDATE web_gen_jobs SET position=$2, eta_sec=$3 WHERE id=$1",
                 job_id,
@@ -627,13 +632,18 @@ async def get_generate(job_id: str, user_id: Annotated[int, Depends(require_user
             )
         elif status == "running":
             position = 0
-            # remaining based on started_at vs typical 45s, min 5
             started = row["started_at"]
             if started:
-                elapsed = max(0, time.time() - started.timestamp())
-                eta_sec = max(5, int(45 - elapsed))
+                elapsed = max(0.0, time.time() - started.timestamp())
+                # stretch ETA if job runs longer than typical (no fake "5s left" forever)
+                base = float(row["eta_sec"] or _TYPICAL_GEN_SEC)
+                if base < _TYPICAL_GEN_SEC:
+                    base = float(_TYPICAL_GEN_SEC)
+                if elapsed > base * 0.85:
+                    base = elapsed + 45
+                eta_sec = max(8, int(base - elapsed))
             else:
-                eta_sec = max(10, int(row["eta_sec"] or 40))
+                eta_sec = max(20, int(row["eta_sec"] or _TYPICAL_GEN_SEC))
             await con.execute(
                 "UPDATE web_gen_jobs SET position=0, eta_sec=$2 WHERE id=$1",
                 job_id,
@@ -643,7 +653,7 @@ async def get_generate(job_id: str, user_id: Annotated[int, Depends(require_user
             position = 0
             eta_sec = 0
 
-    out = {
+    return {
         "job_id": row["id"],
         "status": status,
         "position": position,
@@ -655,17 +665,42 @@ async def get_generate(job_id: str, user_id: Annotated[int, Depends(require_user
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
-        "has_image": bool(row["result_b64"]),
+        "has_image": bool(row["has_image"]),
     }
-    if status == "done" and row["result_b64"]:
-        out["image_base64"] = row["result_b64"]
-        out["image_data_url"] = f"data:image/png;base64,{row['result_b64']}"
-    return out
+
+
+@router.get("/generate/{job_id}/image")
+async def get_generate_image(job_id: str, user_id: Annotated[int, Depends(require_user)]):
+    """Fetch result image once after status=done (separate from poll)."""
+    if len(job_id) > 64 or not re.match(r"^[A-Za-z0-9_-]+$", job_id):
+        raise HTTPException(status_code=400, detail="invalid job_id")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            SELECT user_id, status, result_b64 FROM web_gen_jobs WHERE id=$1
+            """,
+            job_id,
+        )
+    if not row or int(row["user_id"]) != user_id:
+        raise HTTPException(status_code=404, detail="not found")
+    if row["status"] != "done":
+        raise HTTPException(status_code=409, detail="not_ready")
+    if not row["result_b64"]:
+        raise HTTPException(status_code=404, detail="image_gone")
+    b64 = row["result_b64"]
+    return {
+        "job_id": job_id,
+        "image_base64": b64,
+        "image_data_url": f"data:image/png;base64,{b64}",
+        "has_image": True,
+    }
 
 
 @router.delete("/generate/{job_id}/image")
 async def clear_generate_image(job_id: str, user_id: Annotated[int, Depends(require_user)]):
     """Drop base64 after client downloaded — save DB size."""
+    if len(job_id) > 64 or not re.match(r"^[A-Za-z0-9_-]+$", job_id):
+        raise HTTPException(status_code=400, detail="invalid job_id")
     async with _pool.acquire() as con:
         row = await con.fetchrow(
             "SELECT user_id, status FROM web_gen_jobs WHERE id=$1", job_id
