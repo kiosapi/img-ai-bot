@@ -595,27 +595,69 @@ async def get_generate(job_id: str, user_id: Annotated[int, Depends(require_user
         row = await con.fetchrow(
             """
             SELECT id, user_id, status, position, eta_sec, error, result_b64, gen_id,
-                   prompt, size, created_at, finished_at
+                   prompt, size, created_at, started_at, finished_at
             FROM web_gen_jobs WHERE id=$1
             """,
             job_id,
         )
-    if not row or int(row["user_id"]) != user_id:
-        raise HTTPException(status_code=404, detail="not found")
+        if not row or int(row["user_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="not found")
+
+        # live queue position + ETA
+        position = row["position"] or 0
+        eta_sec = row["eta_sec"] or 0
+        status = row["status"]
+        if status == "queued":
+            ahead = await con.fetchval(
+                """
+                SELECT count(*) FROM web_gen_jobs
+                WHERE status IN ('queued','running')
+                  AND created_at < $1
+                """,
+                row["created_at"],
+            )
+            position = int(ahead or 0) + 1
+            # avg 40s per slot in front + self
+            eta_sec = max(15, position * 40)
+            await con.execute(
+                "UPDATE web_gen_jobs SET position=$2, eta_sec=$3 WHERE id=$1",
+                job_id,
+                position,
+                eta_sec,
+            )
+        elif status == "running":
+            position = 0
+            # remaining based on started_at vs typical 45s, min 5
+            started = row["started_at"]
+            if started:
+                elapsed = max(0, time.time() - started.timestamp())
+                eta_sec = max(5, int(45 - elapsed))
+            else:
+                eta_sec = max(10, int(row["eta_sec"] or 40))
+            await con.execute(
+                "UPDATE web_gen_jobs SET position=0, eta_sec=$2 WHERE id=$1",
+                job_id,
+                eta_sec,
+            )
+        elif status in ("done", "failed"):
+            position = 0
+            eta_sec = 0
+
     out = {
         "job_id": row["id"],
-        "status": row["status"],
-        "position": row["position"],
-        "eta_sec": row["eta_sec"],
+        "status": status,
+        "position": position,
+        "eta_sec": eta_sec,
         "error": row["error"],
         "gen_id": row["gen_id"],
         "size": row["size"],
         "prompt": (row["prompt"] or "")[:200],
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
         "has_image": bool(row["result_b64"]),
     }
-    if row["status"] == "done" and row["result_b64"]:
+    if status == "done" and row["result_b64"]:
         out["image_base64"] = row["result_b64"]
         out["image_data_url"] = f"data:image/png;base64,{row['result_b64']}"
     return out

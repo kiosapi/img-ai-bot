@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useRef, useMemo } from "react";
 import { CalendarRange, Clock, Repeat, Send, Edit3, Trash2, Play, X, Eye, Search, History, Timer, AlertTriangle, CheckCircle2, Ban, Loader2, Users, Crown, UserCheck, Activity, Calendar, ImagePlus, Bold, Italic, Link2 } from "lucide-react";
+import { PageLoader } from "@/components/ui/page-loader";
 import { toast } from "sonner";
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -318,7 +319,7 @@ export default function BroadcastSchedPage() {
       </Card>
 
       {/* list */}
-      {loading ? <div className="py-12 text-center text-muted-foreground text-sm"><Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" /> Memuat...</div> : schedules.length === 0 ? (
+      {loading ? <PageLoader label="Memuat..." rows={3} /> : schedules.length === 0 ? (
         <Card><CardContent className="p-8 text-center text-muted-foreground text-sm">Tidak ada jadwal. Buat jadwal baru.</CardContent></Card>
       ) : (
         <div className="grid gap-3">
@@ -402,7 +403,7 @@ export default function BroadcastSchedPage() {
 
       {/* Logs */}
       <Modal open={!!logsModal} onClose={() => setLogsModal(null)} title={`Logs #${logsModal?.id} — ${logsModal?.title || ""}`}>
-        {logsLoading ? <div className="py-8 text-center text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin mx-auto mb-2" />Memuat...</div> : logs.length === 0 ? <div className="text-sm text-muted-foreground">Belum ada logs</div> : (
+        {logsLoading ? <PageLoader label="Memuat..." rows={2} cards={0} /> : logs.length === 0 ? <div className="text-sm text-muted-foreground">Belum ada logs</div> : (
           <div className="flex flex-col gap-2 max-h-[60vh] overflow-y-auto">
             {logs.map((l: any) => (
               <div key={l.id} className="rounded-md border p-3 text-xs">

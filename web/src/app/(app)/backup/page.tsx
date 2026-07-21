@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { HardDrive, Download, Trash2, RefreshCw, AlertTriangle, Clock, CheckCircle2, Database, Archive, XCircle, Loader2, ShieldAlert, FileArchive, Clock3, UploadCloud, RotateCcw, FileCheck } from "lucide-react";
+import { PageLoader } from "@/components/ui/page-loader";
 import { toast } from "sonner";
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -149,7 +150,7 @@ export default function BackupPage() {
   }
 
   if (loading && !backups.length)
-    return <div className="py-20 text-center text-sm text-muted-foreground flex flex-col items-center gap-2 w-full"><RefreshCw className="h-5 w-5 animate-spin" />{lang === "id" ? "Memuat backup..." : "Loading backups..."}</div>;
+    return <PageLoader label={lang === "id" ? "Memuat..." : "Loading..."} cards={3} rows={4} />;
 
   return (
     <div className="flex flex-col gap-5 w-full max-w-full overflow-hidden">

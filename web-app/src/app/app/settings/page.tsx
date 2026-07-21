@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/shell";
+import { PageLoader } from "@/components/page-loader";
 import { api, getToken, setToken, type Me } from "@/lib/utils";
 import { t, type Lang } from "@/lib/i18n";
 
@@ -46,9 +47,9 @@ export default function SettingsPage() {
 
   if (!me) {
     return (
-      <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
-        {t("loading", "id")}
-      </div>
+      <AppShell lang="id">
+        <PageLoader label={t("loading", "id")} cards={2} />
+      </AppShell>
     );
   }
 

@@ -9,6 +9,7 @@ import { Input, Textarea, Badge, Switch } from "@/components/ui/controls";
 import { Modal, Field, CustomSelect } from "@/components/ui/modal";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 type Rule = {
   id: number;
@@ -282,7 +283,7 @@ export default function ModerationPage() {
             <CardHeader className="py-3"><CardTitle className="text-sm flex items-center gap-2"><ShieldAlert className="h-4 w-4"/>{lang==="id"?"Daftar Rule":"Rules List"} ({filteredRules.length})</CardTitle></CardHeader>
             <CardContent className="px-0 pt-0">
               {loading ? (
-                <div className="px-5 py-8 text-center text-sm text-muted-foreground">{lang==="id"?"Memuat...":"Loading..."}</div>
+                <PageLoader label={lang==="id"?"Memuat...":"Loading..."} rows={3} />
               ) : filteredRules.length===0 ? (
                 <div className="px-5 py-8 text-center text-sm text-muted-foreground">{lang==="id"?"Belum ada rule. Tambah untuk mulai filter prompt.":"No rules yet. Add one to start filtering."}</div>
               ) : (

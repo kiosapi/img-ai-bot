@@ -62,9 +62,23 @@ const T = {
     id: "Generate web butuh API + bot worker live.",
     en: "Web generate needs live API + bot worker.",
   },
-  "gen.queue": { id: "Antri...", en: "Queued..." },
-  "gen.running": { id: "Memproses...", en: "Processing..." },
+  "gen.queue": { id: "Antri…", en: "Queued…" },
+  "gen.running": { id: "Memproses…", en: "Processing…" },
   "gen.done": { id: "Selesai", en: "Done" },
+  "gen.eta": { id: "ETA", en: "ETA" },
+  "gen.pos": { id: "Posisi", en: "Position" },
+  "gen.persistHint": {
+    id: "Progress tetap tampil saat pindah halaman",
+    en: "Progress stays while you browse other pages",
+  },
+  "gen.toastDone": { id: "Generate berhasil", en: "Generation complete" },
+  "gen.toastFail": { id: "Generate gagal", en: "Generation failed" },
+  "gen.viewResult": { id: "Lihat hasil", en: "View result" },
+  "gen.resultReady": {
+    id: "Hasil siap. Cek riwayat jika gambar tidak tampil.",
+    en: "Result ready. Check history if image is missing.",
+  },
+  "gen.clear": { id: "Tutup", en: "Dismiss" },
 } as const;
 
 export type Key = keyof typeof T;

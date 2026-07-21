@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/controls";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 function Progress({ val, color = "bg-primary" }: { val: number; color?: string }) {
   return <div className="h-2.5 w-full rounded-full bg-muted overflow-hidden"><div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${Math.min(100, Math.max(0, val))}%` }} /></div>;
@@ -24,7 +25,7 @@ export default function SystemPage() {
   }
   useEffect(() => { load(); const id = setInterval(() => load(), 10000); return () => clearInterval(id); }, []);
 
-  if (loading && !data) return <div className="py-20 text-center text-sm text-muted-foreground flex flex-col gap-2 items-center"><RefreshCw className="h-5 w-5 animate-spin" />{lang === "id" ? "Memuat sistem..." : "Loading system..."}</div>;
+  if (loading && !data) return <PageLoader label={lang === "id" ? "Memuat sistem..." : "Loading system..."} cards={4} rows={3} />;
   if (err) return <div className="py-20 text-center text-destructive text-sm">{err} <div className="mt-2"><Button size="sm" onClick={load}>Retry</Button></div></div>;
   if (!data) return null;
 

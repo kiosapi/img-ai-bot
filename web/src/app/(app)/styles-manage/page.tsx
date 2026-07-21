@@ -9,6 +9,7 @@ import { Input, Textarea, Badge, Switch } from "@/components/ui/controls";
 import { Modal, Field, CustomSelect } from "@/components/ui/modal";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 type StyleItem = {
   id: number;
@@ -245,7 +246,7 @@ export default function StylesManagePage() {
       </Card>
 
       {loading ? (
-        <div className="py-12 text-center text-sm text-muted-foreground">{t("common.loading")}</div>
+        <PageLoader label={t("common.loading")} cards={3} rows={3} />
       ) : styles.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground flex flex-col items-center gap-2">

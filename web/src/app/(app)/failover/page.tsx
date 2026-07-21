@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Badge, Switch } from "@/components/ui/controls";
 import { useLang } from "@/lib/i18n";
 import { toast } from "sonner";
+import { PageLoader } from "@/components/ui/page-loader";
 
 type Provider = {
   id: string;
@@ -184,7 +185,7 @@ export default function FailoverPage() {
   }
 
   if (loading) {
-    return <div className="p-4 text-sm text-muted-foreground flex items-center gap-2"><RefreshCw className="h-4 w-4 animate-spin" />{t("common.loading")}</div>;
+    return <PageLoader label={t("common.loading")} cards={2} rows={3} />;
   }
 
   return (

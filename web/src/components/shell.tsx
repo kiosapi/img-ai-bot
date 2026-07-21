@@ -7,6 +7,7 @@ import { LayoutGrid, Users, Radio, Settings, Moon, Sun, LogOut, Sparkles, BarCha
 import { cn, api } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useLang, FlagID, FlagEN } from "@/lib/i18n";
+import { RouteProgress } from "@/components/ui/route-progress";
 
 const groups = [
   {
@@ -126,6 +127,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen md:flex">
+      <RouteProgress />
       <aside className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 border-r bg-card px-4 py-6 overflow-y-auto">
         <div className="flex items-center gap-2 px-2 mb-8">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
@@ -165,13 +167,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <LangToggle />
             </div>
             {mounted ? (
-              <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="rounded-md p-1.5 hover:bg-muted" aria-label="Toggle theme">
-                {theme === "dark" ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
-              </button>
-            ) : <span className="w-8" />}
+                          <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="rounded-md p-1.5 hover:bg-muted" aria-label="Toggle theme">
+                            {theme === "dark" ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+                          </button>
+                        ) : <span className="w-8" />}
           </div>
         </header>
-        <div className="mx-auto max-w-4xl p-5">{children}</div>
+        <div className="mx-auto max-w-4xl p-5 animate-page-in">{children}</div>
       </main>
     </div>
   );

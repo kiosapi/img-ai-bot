@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Badge, Input, Textarea } from "@/components/ui/controls";
 import { Modal } from "@/components/ui/modal";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 export default function UserDetail() {
   const params = useParams();
@@ -73,7 +74,7 @@ export default function UserDetail() {
     );
   }
 
-  if (!data) return <div className="py-20 text-center text-muted-foreground">{t("common.loading")} user {uidStr}...</div>;
+  if (!data) return <PageLoader label={`${t("common.loading")} user ${uidStr}`} cards={2} rows={4} />;
   const u = data.user;
 
   return (

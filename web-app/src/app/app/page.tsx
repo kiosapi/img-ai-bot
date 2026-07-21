@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Coins, Gauge, Flame, Crown, Sparkles } from "lucide-react";
 import { AppShell } from "@/components/shell";
+import { PageLoader } from "@/components/page-loader";
 import { api, getToken, type Me } from "@/lib/utils";
 import { t, type Lang } from "@/lib/i18n";
 
@@ -34,9 +35,9 @@ export default function HomePage() {
 
   if (!me) {
     return (
-      <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
-        {t("loading", "id")}
-      </div>
+      <AppShell lang="id">
+        <PageLoader label={t("loading", "id")} cards={4} />
+      </AppShell>
     );
   }
 

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
 import { Bell, Plus, Pencil, Trash2, Send, Power, RefreshCw, AlertTriangle, Siren, Webhook, Timer, Activity, Cpu, HardDrive, Clock, Layers, Bot, BarChart3, DollarSign, CheckCircle2, XCircle } from "lucide-react";
+import { PageLoader } from "@/components/ui/page-loader";
 import { toast } from "sonner";
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -180,7 +181,7 @@ export default function AlertsPage() {
     setForm(f => ({ ...f, type: newType, threshold: def != null ? def : f.threshold }));
   }
 
-  if (loading && !rules.length) return <div className="py-20 text-center text-sm text-muted-foreground flex flex-col items-center gap-2"><RefreshCw className="h-5 w-5 animate-spin" />{lang === "id" ? "Memuat alerts..." : "Loading alerts..."}</div>;
+  if (loading && !rules.length) return <PageLoader label={lang === "id" ? "Memuat..." : "Loading..."} cards={3} rows={4} />;
 
   return (
     <div className="flex flex-col gap-5 w-full max-w-full overflow-hidden">

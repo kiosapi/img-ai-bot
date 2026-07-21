@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ImageIcon } from "lucide-react";
 import { AppShell } from "@/components/shell";
+import { ListSkeleton } from "@/components/page-loader";
 import { api, getToken, type Me } from "@/lib/utils";
 import { t, type Lang } from "@/lib/i18n";
 
@@ -44,9 +45,7 @@ export default function HistoryPage() {
     <AppShell lang={lang}>
       <h2 className="mb-4 text-xl font-semibold">{t("history.title", lang)}</h2>
       {err && <p className="text-sm text-destructive">{err}</p>}
-      {!items && !err && (
-        <p className="text-sm text-muted-foreground">{t("loading", lang)}</p>
-      )}
+      {!items && !err && <ListSkeleton rows={5} />}
       {items && items.length === 0 && (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border py-12 text-muted-foreground">
           <ImageIcon className="h-8 w-8" />

@@ -11,6 +11,7 @@ import { Badge, Input } from "@/components/ui/controls";
 import { CustomSelect } from "@/components/ui/modal";
 import { useLang } from "@/lib/i18n";
 import { toast } from "sonner";
+import { PageLoader } from "@/components/ui/page-loader";
 
 type Daily = { date: string; day: string; gen_count: number; success: number; failed: number; revenue: number; cost: number; profit: number; };
 type ProviderBreakdown = { id: string; name: string; is_active: boolean; cost_per_gen: number; gen_count: number; success: number; failed: number; success_rate: number; total_cost: number; };
@@ -112,7 +113,7 @@ export default function CostPage() {
   };
 
   if (loading && !stats)
-    return <div className="py-20 text-center text-sm text-muted-foreground flex flex-col gap-2 items-center"><RefreshCw className="h-5 w-5 animate-spin" />{t("common.loading")}</div>;
+    return <PageLoader label={t("common.loading")} cards={3} rows={4} />;
   if (err)
     return <div className="py-20 text-center text-sm"><div className="text-destructive">{err}</div><div className="mt-3"><Button size="sm" variant="outline" onClick={load}><RefreshCw className="h-4 w-4" />Retry</Button></div></div>;
   if (!stats) return null;

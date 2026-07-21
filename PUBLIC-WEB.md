@@ -103,12 +103,18 @@
 5. Widget setdomain **tidak** required untuk Model B
 6. Static export = no Next server routes
 
-## Status
+## Status (E2E 2026-07-21)
 
 - Spec: **LOCKED Model B**
-- Code: deep-link auth + full app routes (generate/history/styles/settings)
 - Web: https://imgaai.pages.dev
-- API user health (HTTP): VPS `:8001` — **HTTPS still open** for browser production
+- HTTPS API: Cloudflare quick tunnel → `http://127.0.0.1:8001`
+  - Current: `https://link-laughing-venue-called.trycloudflare.com` (baked into Pages)
+  - Process PID cloudflared on VPS; unit `imgaai-cf-tunnel.service` enabled
+  - **Caveat:** quick tunnel URL **ganti** kalau process restart → harus rebuild Pages
+  - Production stabil: named tunnel / custom domain later
 - Bot: `web_jobs` + `/start login_*` claim
-- **Tidak** perlu BotFather setdomain untuk login Model B
-- **Masih perlu:** HTTPS API (tunnel/domain) + rebuild Pages `NEXT_PUBLIC_API_URL`
+- Verified:
+  1. Browser Pages click Login → deep-link Telegram (no mixed content / Failed to fetch)
+  2. API create+poll login-code + claim → `/me` OK
+  3. `POST /generate` → bot worker → job `done` + `result_b64`
+- **Tidak** perlu BotFather setdomain (Model B)

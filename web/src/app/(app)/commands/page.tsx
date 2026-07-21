@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Power, Command, ToggleLeft, ShieldAlert, Users, Image as ImageIcon, Gift, Sparkles, Layers, Settings2, Crown, Wallet, Bot, Search, RefreshCw, CheckCircle2, XCircle } from "lucide-react";
+import { PageLoader } from "@/components/ui/page-loader";
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -58,7 +59,7 @@ export default function CommandsPage() {
     } catch (e: any) { toast.error(e.message); } finally { setSaving(null); setConfirmCmd(null); }
   }
 
-  if (loading && !cmds.length) return <div className="py-20 text-center text-sm text-muted-foreground flex flex-col items-center gap-2"><RefreshCw className="h-5 w-5 animate-spin" />{lang === "id" ? "Memuat commands..." : "Loading commands..."}</div>;
+  if (loading && !cmds.length) return <PageLoader label={lang === "id" ? "Memuat..." : "Loading..."} cards={3} rows={4} />;
 
   return (
     <div className="flex flex-col gap-4 w-full max-w-full overflow-hidden">

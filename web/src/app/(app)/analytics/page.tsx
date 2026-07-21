@@ -6,6 +6,7 @@ import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/controls";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 const KIND_COLORS: Record<string, string> = { generate: "#0a84ff", edit: "#a855f7" };
 
@@ -17,7 +18,7 @@ export default function AnalyticsPage() {
     api("/api/analytics").then(setD).catch((e) => setErr(String(e?.message || e)));
   }, []);
   if (err) return <div className="py-20 text-center text-destructive text-sm">{err}</div>;
-  if (!d) return <div className="py-20 text-center text-muted-foreground">{t("common.loading")}</div>;
+  if (!d) return <PageLoader label={t("common.loading")} cards={4} rows={3} />;
 
   const hours = Array.isArray(d.hours) ? d.hours : [];
   const daily = Array.isArray(d.daily) ? d.daily : [];

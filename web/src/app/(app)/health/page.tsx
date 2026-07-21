@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Bot, HeartPulse, Users, Image as ImageIcon, AlertTriangle, RefreshCw, Power, Zap, Timer, Layers, CheckCircle2, XCircle } from "lucide-react";
+import { PageLoader } from "@/components/ui/page-loader";
 import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -35,7 +36,7 @@ export default function HealthPage() {
     } catch (e: any) { toast.error(e.message || "Restart failed"); } finally { setRestarting(false); setRestartOpen(false); }
   }
 
-  if (loading && !bot) return <div className="py-20 text-center text-sm text-muted-foreground flex flex-col items-center gap-2"><RefreshCw className="h-5 w-5 animate-spin" />{lang === "id" ? "Memuat health..." : "Loading health..."}</div>;
+  if (loading && !bot) return <PageLoader label={lang === "id" ? "Memuat..." : "Loading..."} cards={3} rows={4} />;
 
   const online = bot?.online;
 

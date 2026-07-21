@@ -7,6 +7,7 @@ import { api } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/controls";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 export default function Home() {
   const router = useRouter();
@@ -20,7 +21,7 @@ export default function Home() {
       .catch(() => router.push("/login"));
   }, [router]);
 
-  if (!data) return <div className="py-20 text-center text-muted-foreground">{t("common.loading")}</div>;
+  if (!data) return <PageLoader cards={3} rows={4} />;
 
   const STATS_META = [
     { icon: Users, key: "dash.total_users", color: "text-blue-500" },

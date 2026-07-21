@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Palette } from "lucide-react";
 import { AppShell } from "@/components/shell";
+import { PageLoader } from "@/components/page-loader";
 import { api, getToken, type Me } from "@/lib/utils";
 import { t, type Lang } from "@/lib/i18n";
 
@@ -40,7 +41,7 @@ export default function StylesPage() {
   return (
     <AppShell lang={lang}>
       <h2 className="mb-4 text-xl font-semibold">{t("styles.title", lang)}</h2>
-      {!styles && <p className="text-sm text-muted-foreground">{t("loading", lang)}</p>}
+      {!styles && <PageLoader label={t("loading", lang)} cards={4} />}
       {styles && styles.length === 0 && (
         <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground">
           <Palette className="h-8 w-8" />

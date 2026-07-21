@@ -1,33 +1,25 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2, CheckCircle2 } from "lucide-react";
 import { AppShell } from "@/components/shell";
+import { PageLoader } from "@/components/page-loader";
 import { api, getToken, type Me } from "@/lib/utils";
+import { useGenJob } from "@/lib/gen-job";
 import { t, type Lang } from "@/lib/i18n";
-
-type Job = {
-  job_id: string;
-  status: string;
-  position?: number;
-  eta_sec?: number;
-  error?: string | null;
-  image_data_url?: string;
-  has_image?: boolean;
-};
 
 export default function GeneratePage() {
   const router = useRouter();
+  const { job, busy, start, clearResult } = useGenJob();
   const [lang, setLang] = useState<Lang>("id");
+  const [ready, setReady] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState("1024x1024");
   const [styleCode, setStyleCode] = useState("");
   const [styles, setStyles] = useState<{ code: string; name: string }[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [job, setJob] = useState<Job | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const pollRef = useRef<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!getToken()) {
@@ -40,69 +32,36 @@ export default function GeneratePage() {
         setLang((me.lang as Lang) || "id");
         const s = await api<{ styles: { code: string; name: string }[] }>("/api/user/styles");
         setStyles(s.styles || []);
+        setReady(true);
       } catch {
         router.replace("/");
       }
     })();
-    return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
-    };
   }, [router]);
-
-  async function poll(jobId: string) {
-    try {
-      const j = await api<Job>(`/api/user/generate/${jobId}`);
-      setJob(j);
-      if (j.status === "done" || j.status === "failed") {
-        setBusy(false);
-        if (pollRef.current) {
-          window.clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
-        if (j.status === "done" && j.image_data_url) {
-          try {
-            await api(`/api/user/generate/${jobId}/image`, { method: "DELETE" });
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    } catch (e: any) {
-      setErr(e.message);
-      setBusy(false);
-    }
-  }
 
   async function submit() {
     setErr(null);
-    setJob(null);
-    if (!prompt.trim()) return;
-    setBusy(true);
+    if (!prompt.trim() || busy || submitting) return;
+    setSubmitting(true);
     try {
-      const res = await api<{ job_id: string; status: string; position: number; eta_sec: number }>(
-        "/api/user/generate",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            prompt: prompt.trim(),
-            size,
-            style_code: styleCode || null,
-          }),
-        }
-      );
-      setJob({
-        job_id: res.job_id,
-        status: res.status,
-        position: res.position,
-        eta_sec: res.eta_sec,
+      await start({
+        prompt: prompt.trim(),
+        size,
+        style_code: styleCode || null,
       });
-      if (pollRef.current) window.clearInterval(pollRef.current);
-      pollRef.current = window.setInterval(() => poll(res.job_id), 2000);
-      await poll(res.job_id);
     } catch (e: any) {
-      setErr(e.message);
-      setBusy(false);
+      setErr(e?.message || t("err.generic", lang));
+    } finally {
+      setSubmitting(false);
     }
+  }
+
+  if (!ready) {
+    return (
+      <AppShell lang={lang}>
+        <PageLoader label={t("loading", lang)} cards={2} />
+      </AppShell>
+    );
   }
 
   return (
@@ -116,7 +75,7 @@ export default function GeneratePage() {
         onChange={(e) => setPrompt(e.target.value)}
         rows={5}
         placeholder={t("gen.placeholder", lang)}
-        disabled={busy}
+        disabled={busy || submitting}
         className="w-full resize-none rounded-xl border border-border bg-card p-3 text-sm outline-none ring-ring focus:ring-2 disabled:opacity-60"
       />
 
@@ -126,7 +85,7 @@ export default function GeneratePage() {
           <select
             value={size}
             onChange={(e) => setSize(e.target.value)}
-            disabled={busy}
+            disabled={busy || submitting}
             className="min-h-[44px] w-full rounded-xl border border-border bg-card px-3 text-sm"
           >
             <option value="1024x1024">1:1</option>
@@ -141,7 +100,7 @@ export default function GeneratePage() {
           <select
             value={styleCode}
             onChange={(e) => setStyleCode(e.target.value)}
-            disabled={busy}
+            disabled={busy || submitting}
             className="min-h-[44px] w-full rounded-xl border border-border bg-card px-3 text-sm"
           >
             <option value="">—</option>
@@ -157,11 +116,11 @@ export default function GeneratePage() {
       <button
         type="button"
         onClick={submit}
-        disabled={busy || !prompt.trim()}
+        disabled={busy || submitting || !prompt.trim()}
         className="mt-4 flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-50"
       >
-        {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-        {t("gen.submit", lang)}
+        {(busy || submitting) && <Loader2 className="h-4 w-4 animate-spin" />}
+        {busy ? t("gen.running", lang) : t("gen.submit", lang)}
       </button>
 
       {err && (
@@ -171,23 +130,68 @@ export default function GeneratePage() {
         </div>
       )}
 
-      {job && (
-        <div className="mt-4 rounded-xl border border-border bg-card p-4 text-sm">
-          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-            {job.status}
-            {job.status === "queued" || job.status === "running"
-              ? ` · pos ${job.position ?? "—"} · ~${job.eta_sec ?? "?"}s`
-              : ""}
+      {job && (job.status === "queued" || job.status === "running") && (
+        <div className="mt-4 rounded-xl border border-primary/25 bg-card p-4">
+          <div className="mb-2 flex items-center justify-between text-sm font-medium">
+            <span>
+              {job.status === "queued" ? t("gen.queue", lang) : t("gen.running", lang)}
+            </span>
+            <span className="text-xs text-muted-foreground">{Math.round(job.progress)}%</span>
           </div>
-          {job.error && <p className="mt-2 text-destructive">{job.error}</p>}
-          {job.image_data_url && (
+          <div className="h-2.5 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-[width] duration-500"
+              style={{ width: `${Math.round(job.progress)}%` }}
+            />
+          </div>
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {job.status === "queued" && job.position
+              ? `${t("gen.pos", lang)} ${job.position} · `
+              : ""}
+            {t("gen.eta", lang)} ~{Math.max(3, Math.round(job.etaSec || 40))}s
+            {" · "}
+            {t("gen.persistHint", lang)}
+          </p>
+        </div>
+      )}
+
+      {job?.status === "done" && (
+        <div className="mt-4 rounded-xl border border-success/40 bg-card p-4">
+          <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-success">
+            <CheckCircle2 className="h-4 w-4" />
+            {t("gen.toastDone", lang)}
+          </div>
+          {job.imageDataUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={job.image_data_url}
+              src={job.imageDataUrl}
               alt="result"
-              className="mt-3 w-full rounded-lg border border-border"
+              className="w-full rounded-lg border border-border"
             />
+          ) : (
+            <p className="text-xs text-muted-foreground">{t("gen.resultReady", lang)}</p>
           )}
+          <button
+            type="button"
+            onClick={clearResult}
+            className="mt-3 min-h-[40px] w-full rounded-xl border border-border text-sm font-medium hover:bg-muted"
+          >
+            {t("gen.clear", lang)}
+          </button>
+        </div>
+      )}
+
+      {job?.status === "failed" && (
+        <div className="mt-4 rounded-xl border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+          {t("gen.toastFail", lang)}
+          {job.error ? `: ${job.error}` : ""}
+          <button
+            type="button"
+            onClick={clearResult}
+            className="mt-3 block min-h-[40px] w-full rounded-xl border border-destructive/30 text-sm font-medium"
+          >
+            {t("gen.clear", lang)}
+          </button>
         </div>
       )}
     </AppShell>

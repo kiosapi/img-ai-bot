@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { Home, Sparkles, History, Palette, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { t, type Lang } from "@/lib/i18n";
+import { GenProgressBar } from "@/components/gen-progress";
 
 const NAV = [
   { href: "/app/", icon: Home, key: "nav.home" as const },
@@ -24,7 +25,7 @@ export function AppShell({
   const pathname = usePathname() || "/";
 
   return (
-    <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col px-4 pb-24 pt-5 sm:max-w-2xl">
+    <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col px-4 pb-28 pt-5 sm:max-w-2xl">
       <header className="mb-6 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground">
@@ -34,9 +35,11 @@ export function AppShell({
         </div>
       </header>
 
-      <main className="flex-1">{children}</main>
+      <main className="flex-1 animate-page-in">{children}</main>
 
-      <nav className="fixed bottom-0 left-0 right-0 border-t border-border bg-card/95 backdrop-blur-md">
+      <GenProgressBar lang={lang} />
+
+      <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-border bg-card/95 backdrop-blur-md">
         <div className="mx-auto flex max-w-lg items-stretch justify-between px-2 py-2 sm:max-w-2xl">
           {NAV.map((item) => {
             const active =
@@ -48,8 +51,8 @@ export function AppShell({
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex min-h-[44px] min-w-[44px] flex-1 flex-col items-center justify-center gap-0.5 rounded-lg text-[10px] font-medium sm:text-xs",
-                  active ? "text-primary" : "text-muted-foreground"
+                  "flex min-h-[44px] min-w-[44px] flex-1 flex-col items-center justify-center gap-0.5 rounded-lg text-[10px] font-medium transition-colors sm:text-xs",
+                  active ? "text-primary" : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 <Icon className="h-5 w-5" />

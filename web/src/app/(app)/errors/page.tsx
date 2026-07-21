@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/controls";
 import { useLang } from "@/lib/i18n";
+import { PageLoader } from "@/components/ui/page-loader";
 
 export default function ErrorsPage() {
   const { t, lang } = useLang();
@@ -13,7 +14,7 @@ export default function ErrorsPage() {
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => { api("/api/errors").then(setD).catch((e) => setErr(String(e?.message || e))); }, []);
   if (err) return <div className="py-20 text-center text-destructive text-sm">{err}</div>;
-  if (!d) return <div className="py-20 text-center text-muted-foreground">{t("common.loading")}</div>;
+  if (!d) return <PageLoader label={t("common.loading")} cards={4} rows={3} />;
 
   const errorsArr: any[] = Array.isArray(d.errors) ? d.errors : [];
   const failedToday = errorsArr.filter((e: any) => { try { const dt = new Date(e.created_at); const today = new Date(); return dt.toDateString() === today.toDateString(); } catch { return false; } }).length;
