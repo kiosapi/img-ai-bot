@@ -151,8 +151,7 @@ async def _do_edit(message: Message, file_id: str, prompt: str, force_size: str 
             except Exception:
                 _ml = active_model.get("display_name") or active_model.get("external_id") or ""
             cap += f"\nModel: {_ml}"
-        if wm_on and wm_text:
-            cap += f"\n\n{wm_text}"
+        # watermark only burned into image — no caption duplicate
         sent = await message.answer_photo(BufferedInputFile(img, filename="edited.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
         try:
             result_file_id = sent.photo[-1].file_id

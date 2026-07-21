@@ -343,16 +343,20 @@ async def _do_generate(message: Message, prompt: str, variation: bool=False, for
 
             if batch==1:
                 cap=t("gen_done", lang, prompt=final_prompt[:200], size=size, left=ui.sisa_text(used_batch, limit_batch, lang))
-                if negative: cap+=f"\n🚫 Neg: {negative[:80]}"
-                if seed: cap+=f"\n🎲 Seed: {seed}"
-                if ref_file_id: cap+="\n🖼️ Ref: ON"
-                if model_label: cap+=f"\nModel: {model_label}"
-                if wm_on and wm_text: cap+=f"\n\n{wm_text}"
+                if negative:
+                    cap += "\nNeg: " + negative[:80]
+                if seed:
+                    cap += "\nSeed: " + str(seed)
+                if ref_file_id:
+                    cap += "\nRef: ON"
+                if model_label:
+                    cap += "\nModel: " + model_label
+                # watermark only on image pixels — never duplicate in caption
                 sent=await message.answer_photo(BufferedInputFile(img_bytes, filename="image.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
             else:
-                cap=t("batch_done_item", lang, idx=idx+1, total=batch, prompt=final_prompt[:120], size=size)+f"\n📊 {ui.sisa_text(used_batch, limit_batch, lang)}"
-                if model_label: cap+=f"\nModel: {model_label}"
-                if wm_on and wm_text: cap+=f"\n\n{wm_text}"
+                cap=t("batch_done_item", lang, idx=idx+1, total=batch, prompt=final_prompt[:120], size=size) + "\n" + ui.sisa_text(used_batch, limit_batch, lang)
+                if model_label:
+                    cap += "\nModel: " + model_label
                 sent=await message.answer_photo(BufferedInputFile(img_bytes, filename=f"image_{idx+1}.png"), caption=cap, reply_markup=ui.result_menu(lang, gen_id=0))
 
             try:

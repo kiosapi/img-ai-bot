@@ -135,8 +135,7 @@ async def _do_batch(message: Message, prompt: str, count: int):
                     except Exception:
                         _ml = active_model.get("display_name") or active_model.get("external_id") or ""
                     caption += f"\nModel: {_ml}"
-                if wm_on and wm_text:
-                    caption += f"\n\n{wm_text}"
+                # watermark only on image — no caption double
                 try:
                     sent = await message.answer_photo(BufferedInputFile(img_bytes, filename=f"batch_{success+1}.png"), caption=caption, reply_markup=ui.result_menu(lang, gen_id=0) if success == count-1 else None)
                     try:
