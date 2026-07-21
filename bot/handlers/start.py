@@ -38,12 +38,136 @@ async def _help_dynamic(lang: str) -> str:
     return ui.help_text(lang)
 
 
+async def _handle_web_login(message: Message, code: str) -> None:
+    """Claim one-time web login code (public web-app Model B)."""
+    import re
+    import secrets as _secrets
+    import time as _time
+
+    u = message.from_user
+    lang = await _lang(u.id)
+    await db.upsert_user(u.id, u.username, u.first_name, getattr(u, "language_code", None))
+    if await db.is_banned(u.id):
+        await message.answer(
+            "Akun diblokir. Login web gagal." if lang == "id" else "Account banned. Web login failed."
+        )
+        return
+    if not code or not re.match(r"^[A-Za-z0-9_-]{8,48}$", code):
+        await message.answer(
+            "Kode login tidak valid. Buka ulang halaman web."
+            if lang == "id"
+            else "Invalid login code. Reopen the website."
+        )
+        return
+    if not db._pool:
+        await message.answer("DB offline. Coba lagi." if lang == "id" else "DB offline. Try again.")
+        return
+    async with db._pool.acquire() as con:
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS web_login_codes (
+                code TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                user_id BIGINT,
+                session_token TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '5 minutes',
+                claimed_at TIMESTAMPTZ,
+                ip TEXT,
+                user_agent TEXT
+            )
+            """
+        )
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '30 days',
+                user_agent TEXT,
+                ip TEXT
+            )
+            """
+        )
+        row = await con.fetchrow(
+            "SELECT code, status, expires_at FROM web_login_codes WHERE code=$1",
+            code,
+        )
+        if not row:
+            msg = (
+                "Kode login tidak ditemukan / sudah kadaluarsa.\nBuka ulang website, klik Login, lalu buka link baru."
+                if lang == "id"
+                else "Login code not found or expired.\nReopen the site, click Login, then open the new link."
+            )
+            await message.answer(msg)
+            return
+        if row["status"] != "pending":
+            await message.answer(
+                "Kode ini sudah dipakai. Buka ulang website untuk login baru."
+                if lang == "id"
+                else "This code was already used. Reopen the site for a new login."
+            )
+            return
+        if row["expires_at"].timestamp() < _time.time():
+            await con.execute(
+                "UPDATE web_login_codes SET status='expired' WHERE code=$1 AND status='pending'",
+                code,
+            )
+            await message.answer(
+                "Kode login kadaluarsa (5 menit). Buka ulang website."
+                if lang == "id"
+                else "Login code expired (5 min). Reopen the website."
+            )
+            return
+        token = _secrets.token_urlsafe(32)
+        await con.execute(
+            """
+            INSERT INTO user_sessions (token, user_id, expires_at, user_agent, ip)
+            VALUES ($1, $2, now() + interval '30 days', $3, $4)
+            """,
+            token,
+            u.id,
+            "telegram-bot-login",
+            "bot",
+        )
+        updated = await con.fetchval(
+            """
+            UPDATE web_login_codes
+            SET status='claimed', user_id=$2, session_token=$3, claimed_at=now()
+            WHERE code=$1 AND status='pending'
+            RETURNING code
+            """,
+            code,
+            u.id,
+            token,
+        )
+        if not updated:
+            await message.answer(
+                "Kode sudah diklaim. Coba login lagi dari web."
+                if lang == "id"
+                else "Code already claimed. Try login again from the web."
+            )
+            return
+    ok = (
+        "<b>Login web berhasil</b>\n\nKembali ke browser — halaman imgaai akan otomatis masuk.\nKalau belum, refresh tab website."
+        if lang == "id"
+        else "<b>Web login successful</b>\n\nReturn to your browser — imgaai will sign in automatically.\nIf not, refresh the website tab."
+    )
+    await message.answer(ok, reply_markup=ui.main_menu(lang))
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     u = message.from_user
     lang = await _lang(u.id)
     payload = (message.text or "").partition(" ")[2].strip()
+    # Model B web login: /start login_<code>
+    if payload.startswith("login_"):
+        code = payload[6:].strip()
+        await _handle_web_login(message, code)
+        return
     if payload.startswith("gen_"):
         raw = payload[4:].replace("_", " ").strip()
         if raw and raw not in ("inline_empty", "inline_new"):

@@ -4,16 +4,24 @@ const T = {
   "app.name": { id: "imgaai", en: "imgaai" },
   "login.title": { id: "Masuk dengan Telegram", en: "Sign in with Telegram" },
   "login.sub": {
-    id: "Pakai akun Telegram yang sama dengan bot. Kuota & saldo sinkron.",
-    en: "Use the same Telegram account as the bot. Quota & balance sync.",
+    id: "Klik login → buka bot → konfirmasi. Kuota & saldo sinkron.",
+    en: "Click login → open bot → confirm. Quota & balance sync.",
   },
-  "login.needDomain": {
-    id: "Widget butuh domain BotFather setdomain (pages.dev).",
-    en: "Widget needs BotFather setdomain for pages.dev.",
+  "login.cta": { id: "Login via Telegram", en: "Login via Telegram" },
+  "login.waiting": { id: "Menunggu konfirmasi di bot…", en: "Waiting for bot confirmation…" },
+  "login.waitingHint": {
+    id: "Di Telegram tekan Start / konfirmasi. Halaman ini auto-masuk.",
+    en: "In Telegram press Start / confirm. This page signs in automatically.",
   },
-  "login.devHint": {
-    id: "Dev: set NEXT_PUBLIC_API_URL ke API VPS.",
-    en: "Dev: set NEXT_PUBLIC_API_URL to VPS API.",
+  "login.openAgain": { id: "Buka bot lagi", en: "Open bot again" },
+  "login.cancelWait": { id: "Batal / coba ulang", en: "Cancel / retry" },
+  "login.expired": {
+    id: "Kode login kadaluarsa. Klik login lagi.",
+    en: "Login code expired. Click login again.",
+  },
+  "login.flowHint": {
+    id: "Tanpa widget. Auth lewat deep-link bot (Model B).",
+    en: "No widget. Auth via bot deep-link (Model B).",
   },
   "nav.home": { id: "Beranda", en: "Home" },
   "nav.generate": { id: "Generate", en: "Generate" },

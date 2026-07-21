@@ -1,4 +1,4 @@
-"""Public user API routes for imgaai web-app (Telegram Login)."""
+"""Public user API routes for imgaai web-app (Telegram deep-link login + sessions)."""
 from __future__ import annotations
 
 import hashlib
@@ -71,6 +71,28 @@ async def ensure_user_tables(pool) -> None:
         )
         await con.execute(
             "DELETE FROM user_sessions WHERE expires_at < now()"
+        )
+        await con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS web_login_codes (
+                code TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                user_id BIGINT,
+                session_token TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '5 minutes',
+                claimed_at TIMESTAMPTZ,
+                ip TEXT,
+                user_agent TEXT
+            )
+            """
+        )
+        await con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_web_login_codes_status ON web_login_codes(status, expires_at)"
+        )
+        # cleanup old codes
+        await con.execute(
+            "DELETE FROM web_login_codes WHERE expires_at < now() - interval '1 day'"
         )
         await con.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS gallery_public BOOLEAN NOT NULL DEFAULT false"
@@ -153,6 +175,82 @@ def _set_user_cookie(response: Response, token: str) -> None:
         max_age=86400 * 30,
         path="/",
     )
+
+
+
+class LoginCodeCreateOut(BaseModel):
+    ok: bool = True
+    code: str
+    deep_link: str
+    expires_in: int = 300
+
+
+def _valid_login_code(code: str) -> bool:
+    return bool(code) and bool(re.match(r"^[A-Za-z0-9_-]{8,48}$", code))
+
+
+@router.post("/auth/login-code")
+async def create_login_code(request: Request):
+    """Model B: one-time deep-link login via bot /start login_<code>."""
+    ip = _client_ip(request)
+    now = time.time()
+    attempts = [t for t in _login_attempts.get(ip, []) if now - t < 60]
+    if len(attempts) >= 30:
+        raise HTTPException(status_code=429, detail="Too many attempts, wait 1 minute")
+    attempts.append(now)
+    _login_attempts[ip] = attempts
+
+    bot_user = (os.environ.get("BOT_USERNAME") or os.environ.get("NEXT_PUBLIC_BOT_USERNAME") or "imgaai_bot").lstrip("@")
+    code = secrets.token_urlsafe(12)
+    ua = (request.headers.get("user-agent") or "")[:300]
+    async with _pool.acquire() as con:
+        await con.execute(
+            """
+            INSERT INTO web_login_codes (code, status, expires_at, ip, user_agent)
+            VALUES ($1, 'pending', now() + interval '5 minutes', $2, $3)
+            """,
+            code,
+            ip[:64],
+            ua,
+        )
+    deep = f"https://t.me/{bot_user}?start=login_{code}"
+    return {"ok": True, "code": code, "deep_link": deep, "expires_in": 300}
+
+
+@router.get("/auth/login-code/{code}")
+async def poll_login_code(code: str, request: Request, response: Response):
+    if not _valid_login_code(code):
+        raise HTTPException(status_code=400, detail="invalid code")
+    async with _pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            SELECT code, status, session_token, user_id, expires_at
+            FROM web_login_codes WHERE code=$1
+            """,
+            code,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        if row["status"] == "pending" and row["expires_at"].timestamp() < time.time():
+            await con.execute(
+                "UPDATE web_login_codes SET status='expired' WHERE code=$1 AND status='pending'",
+                code,
+            )
+            return {"status": "expired"}
+        if row["status"] == "pending":
+            return {"status": "pending"}
+        if row["status"] == "expired":
+            return {"status": "expired"}
+        if row["status"] == "claimed" and row["session_token"]:
+            token = row["session_token"]
+            # one-time handoff: clear token from row after poll succeeds once? keep until expiry for retry
+            _set_user_cookie(response, token)
+            return {
+                "status": "claimed",
+                "token": token,
+                "user_id": int(row["user_id"]) if row["user_id"] else None,
+            }
+        return {"status": row["status"] or "unknown"}
 
 
 @router.post("/auth/telegram")
